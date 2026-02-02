@@ -1,0 +1,3 @@
+[submodule "edge-lib"]
+	path = edge-lib
+	url = git@gitlab.com:allxon.com/agent/edge-lib.git
