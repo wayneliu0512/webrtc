@@ -51,19 +51,34 @@ async function init() {
 
     pc.onicecandidate = (event) => {
         if (event.candidate) {
-            log("OnIceCandidate: " + event.candidate);
-            const candidateMsg = { type: "candidate", candidate: event.candidate };
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                 ws.send(JSON.stringify(candidateMsg));
-            } else {
-                log("Queueing ICE candidate");
-                candidateQueue.push(candidateMsg);
-            }
+            log("OnIceCandidate: " + event.candidate.candidate);
         }
     };
 
-    pc.onconnectionstatechange = () => {
+    pc.onconnectionstatechange = async () => {
         log(`PC State: ${pc.connectionState}`);
+        if (pc.connectionState === 'connected') {
+            try {
+                const stats = await pc.getStats();
+                let pairFound = false;
+                stats.forEach(report => {
+                    if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+                        const localCandidate = stats.get(report.localCandidateId);
+                        const remoteCandidate = stats.get(report.remoteCandidateId);
+                        if (localCandidate && remoteCandidate) {
+                            const formatCandidate = (c) => {
+                                if (c.candidate) return c.candidate;
+                                return `${c.candidateType} ${c.protocol} ${c.address || c.ip}:${c.port}`;
+                            };
+                            log(`Selected Pair: ${formatCandidate(localCandidate)} <-> ${formatCandidate(remoteCandidate)}`);
+                            pairFound = true;
+                        }
+                    }
+                });
+            } catch (err) {
+                log(`Error getting stats: ${err}`);
+            }
+        }
     };
 
     pc.ondatachannel = (event) => {
@@ -93,13 +108,6 @@ function connectWebSocket() {
     
     // Create and send offer
     createAndSendOffer();
-    
-    // Flush candidate queue
-    while (candidateQueue.length > 0) {
-        const msg = candidateQueue.shift();
-        ws.send(JSON.stringify(msg));
-        log("Sent queued candidate");
-    }
   };
 
   ws.onmessage = async (event) => {
@@ -162,6 +170,24 @@ async function createAndSendOffer() {
     log("Creating Offer...");
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
+    // Wait for ICE gathering to complete
+    if (pc.iceGatheringState === 'complete') {
+        sendOffer();
+    } else {
+        const checkState = () => {
+            if (pc.iceGatheringState === 'complete') {
+                pc.removeEventListener('icegatheringstatechange', checkState);
+                sendOffer();
+            }
+        };
+        pc.addEventListener('icegatheringstatechange', checkState);
+    }
+}
+
+function sendOffer() {
+    log("ICE Gathering Complete. Sending Offer...");
+    const offer = pc.localDescription;
     ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
 }
 

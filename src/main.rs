@@ -13,7 +13,6 @@ use tower_http::services::ServeDir;
 use tracing::info;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use webrtc::api::setting_engine::SettingEngine;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -26,7 +25,7 @@ use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
-use webrtc::{api::APIBuilder, ice::mdns::MulticastDnsMode};
+use webrtc::{api::APIBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -83,15 +82,10 @@ async fn handle_socket(socket: WebSocket) {
     // Use the default set of Interceptors
     registry = register_default_interceptors(registry, &mut m).unwrap();
 
-    // Create a SettingEngine and disable mDNS
-    let mut se = SettingEngine::default();
-    // se.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
-
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
-        .with_setting_engine(se)
         .build();
 
     // Prepare the configuration
@@ -178,18 +172,32 @@ async fn handle_socket(socket: WebSocket) {
     }));
 
     // Register on_ice_candidate handler
-    let tx_candidate = tx.clone();
     peer_connection.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-        let tx = tx_candidate.clone();
         Box::pin(async move {
             if let Some(candidate) = c {
                 if let Ok(candidate_json) = candidate.to_json() {
                     info!("Generated Local Candidate: {:?}", candidate_json);
-                    let json = serde_json::json!({
-                        "type": "candidate",
-                        "candidate": candidate_json
-                    });
-                    let _ = tx.send(json.to_string());
+                }
+            }
+        })
+    }));
+
+    // Register on_ice_connection_state_change
+    let pc_state = Arc::downgrade(&peer_connection);
+    peer_connection.on_ice_connection_state_change(Box::new(move |connection_state: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState| {
+        let pc_state = pc_state.clone();
+        Box::pin(async move {
+            info!("Connection State has changed {}", connection_state);
+            if connection_state == webrtc::ice_transport::ice_connection_state::RTCIceConnectionState::Connected {
+                if let Some(pc) = pc_state.upgrade() {
+                    // Access ICE transport via SCTP (DataChannel)
+                    let sctp = pc.sctp();
+                    let dtls_transport = sctp.transport();
+                    let ice_transport = dtls_transport.ice_transport();
+                    
+                    if let Some(pair) = ice_transport.get_selected_candidate_pair().await {
+                        info!("Selected Candidate Pair: {:?}", pair);
+                    }
                 }
             }
         })
@@ -212,7 +220,10 @@ async fn handle_socket(socket: WebSocket) {
                         .unwrap();
 
                     let answer = peer_connection.create_answer(None).await.unwrap();
+                    let mut gathering_complete = peer_connection.gathering_complete_promise().await;
                     peer_connection.set_local_description(answer).await.unwrap();
+                    while let Some(_) = gathering_complete.recv().await {}
+                    info!("Gathering complete");
 
                     if let Some(local_desc) = peer_connection.local_description().await {
                         let json_answer = serde_json::json!({
