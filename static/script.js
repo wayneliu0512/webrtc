@@ -51,6 +51,7 @@ async function init() {
 
     pc.onicecandidate = (event) => {
         if (event.candidate) {
+            log("OnIceCandidate: " + event.candidate);
             const candidateMsg = { type: "candidate", candidate: event.candidate };
             if (ws && ws.readyState === WebSocket.OPEN) {
                  ws.send(JSON.stringify(candidateMsg));
@@ -151,6 +152,7 @@ async function handleSignalingMessage(msg) {
   } else if (msg.type === "candidate") {
     log("Received ICE Candidate");
     if (msg.candidate) {
+      log("Add ICE Candidate: " + msg.candidate);
       await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
     }
   }

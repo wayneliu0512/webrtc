@@ -11,9 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tracing::info;
-use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
@@ -26,6 +26,7 @@ use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
+use webrtc::{api::APIBuilder, ice::mdns::MulticastDnsMode};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,10 +83,15 @@ async fn handle_socket(socket: WebSocket) {
     // Use the default set of Interceptors
     registry = register_default_interceptors(registry, &mut m).unwrap();
 
+    // Create a SettingEngine and disable mDNS
+    let mut se = SettingEngine::default();
+    // se.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
+        .with_setting_engine(se)
         .build();
 
     // Prepare the configuration
@@ -178,6 +184,7 @@ async fn handle_socket(socket: WebSocket) {
         Box::pin(async move {
             if let Some(candidate) = c {
                 if let Ok(candidate_json) = candidate.to_json() {
+                    info!("Generated Local Candidate: {:?}", candidate_json);
                     let json = serde_json::json!({
                         "type": "candidate",
                         "candidate": candidate_json
@@ -230,5 +237,9 @@ async fn handle_socket(socket: WebSocket) {
                 _ => {}
             }
         }
+    }
+
+    if let Err(e) = peer_connection.close().await {
+        info!("Failed to close peer connection: {}", e);
     }
 }
