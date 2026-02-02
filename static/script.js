@@ -7,6 +7,7 @@ const logsDiv = document.getElementById("logs");
 let pc = null;
 let dc = null;
 let ws = null;
+let candidateQueue = [];
 
 function log(msg) {
   const div = document.createElement("div");
@@ -49,10 +50,14 @@ async function init() {
     };
 
     pc.onicecandidate = (event) => {
-        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({ type: "candidate", candidate: event.candidate }),
-          );
+        if (event.candidate) {
+            const candidateMsg = { type: "candidate", candidate: event.candidate };
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                 ws.send(JSON.stringify(candidateMsg));
+            } else {
+                log("Queueing ICE candidate");
+                candidateQueue.push(candidateMsg);
+            }
         }
     };
 
@@ -64,6 +69,10 @@ async function init() {
         log(`DataChannel received: ${event.channel.label}`);
         setupDataChannel(event.channel);
     };
+
+    // Create Data Channel (Frontend is Offerer)
+    const dataChannel = pc.createDataChannel("data");
+    setupDataChannel(dataChannel);
 
     log("Connecting to WebSocket...");
     connectWebSocket();
@@ -80,6 +89,16 @@ function connectWebSocket() {
   ws.onopen = () => {
     log("WebSocket connected");
     statusSpan.textContent = "Signaling Connected";
+    
+    // Create and send offer
+    createAndSendOffer();
+    
+    // Flush candidate queue
+    while (candidateQueue.length > 0) {
+        const msg = candidateQueue.shift();
+        ws.send(JSON.stringify(msg));
+        log("Sent queued candidate");
+    }
   };
 
   ws.onmessage = async (event) => {
@@ -126,18 +145,22 @@ function setupDataChannel(channel) {
 }
 
 async function handleSignalingMessage(msg) {
-  if (msg.type === "offer") {
-    log("Received Offer");
+  if (msg.type === "answer") {
+    log("Received Answer");
     await pc.setRemoteDescription(new RTCSessionDescription(msg));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    ws.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
   } else if (msg.type === "candidate") {
     log("Received ICE Candidate");
     if (msg.candidate) {
       await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
     }
   }
+}
+
+async function createAndSendOffer() {
+    log("Creating Offer...");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: "offer", sdp: offer.sdp }));
 }
 
 sendBtn.onclick = () => {

@@ -5,6 +5,8 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use futures::SinkExt;
+use futures::stream::StreamExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
@@ -12,12 +14,12 @@ use tracing::info;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
@@ -51,7 +53,20 @@ async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(handle_socket)
 }
 
-async fn handle_socket(mut socket: WebSocket) {
+async fn handle_socket(socket: WebSocket) {
+    let (mut sender, mut receiver) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Spawn a task to write messages to the WebSocket
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = sender.send(Message::Text(msg)).await {
+                info!("Failed to send message: {}", e);
+                break;
+            }
+        }
+    });
+
     // Create a MediaEngine object to configure the supported codec
     let mut m = MediaEngine::default();
 
@@ -101,20 +116,6 @@ async fn handle_socket(mut socket: WebSocket) {
         .await
         .unwrap();
 
-    // Create a datachannel with label 'data'
-    let data_channel = peer_connection
-        .create_data_channel("data", None)
-        .await
-        .unwrap();
-
-    // Set the handler for Peer Connection State
-    // This will notify you when the peer has connected/disconnected
-    peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-        info!("Peer Connection State has changed: {}", s);
-
-        Box::pin(async {})
-    }));
-
     // Register on_track handler for loopback
     let local_track_clone = local_track.clone();
     peer_connection.on_track(Box::new(
@@ -138,73 +139,81 @@ async fn handle_socket(mut socket: WebSocket) {
         },
     ));
 
-    // Register channel opening handling
-    let d_label = data_channel.label().to_owned();
-    let d_id = data_channel.id();
-    data_channel.on_open(Box::new(move || {
-        info!("Data channel '{}'-'{}' open", d_label, d_id);
+    // Register data channel creation handling
+    peer_connection.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
+        let d_label = d.label().to_owned();
+        let d_id = d.id();
+        info!("New DataChannel {} {}", d_label, d_id);
 
+        // Register channel opening handling
         Box::pin(async move {
-            // let d2 = d.clone();
-            // let d_label2 = d_label.clone();
-            // let d_id2 = d_id;
-            //
-            // // Detach the data channel
-            // d2.on_message(Box::new(move |msg: DataChannelMessage| {
-            //     let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-            //     info!("Message from DataChannel '{}'-'{}': '{}'", d_label2, d_id2, msg_str);
-            //     Box::pin(async {})
-            // }));
+            let d2 = d.clone();
+            let d_label2 = d_label.clone();
+            let d_id2 = d_id;
+            d.on_open(Box::new(move || {
+                info!("Data channel '{}'-'{}' open", d_label2, d_id2);
+
+                Box::pin(async move {
+                    let d_label3 = d_label2.clone();
+                    let d3 = d2.clone();
+                    d2.on_message(Box::new(move |msg: DataChannelMessage| {
+                        let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+                        info!("Message from DataChannel '{}': '{}'", d_label3, msg_str);
+
+                        let d4 = d3.clone();
+                        Box::pin(async move {
+                            let reply = format!("Echo from Rust: {}", msg_str);
+                            let _ = d4.send_text(reply).await;
+                        })
+                    }));
+                })
+            }));
         })
     }));
 
-    // Register text message handling
-    let d_label = data_channel.label().to_owned();
-    let d_clone = data_channel.clone();
-    data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
-        let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-        info!("Message from DataChannel '{}': '{}'", d_label, msg_str);
-
-        let d = d_clone.clone();
+    // Register on_ice_candidate handler
+    let tx_candidate = tx.clone();
+    peer_connection.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+        let tx = tx_candidate.clone();
         Box::pin(async move {
-            let reply = format!("Echo from Rust: {}", msg_str);
-            let _ = d.send_text(reply).await;
+            if let Some(candidate) = c {
+                if let Ok(candidate_json) = candidate.to_json() {
+                    let json = serde_json::json!({
+                        "type": "candidate",
+                        "candidate": candidate_json
+                    });
+                    let _ = tx.send(json.to_string());
+                }
+            }
         })
     }));
-
-    // Create an offer to send to the browser
-    let offer = peer_connection.create_offer(None).await.unwrap();
-    let mut gather_complete = peer_connection.gathering_complete_promise().await;
-    peer_connection.set_local_description(offer).await.unwrap();
-    let _ = gather_complete.recv().await;
-
-    // Send the offer to the client via WebSocket
-    if let Some(local_desc) = peer_connection.local_description().await {
-        let json_offer = serde_json::json!({
-            "type": "offer",
-            "sdp": local_desc.sdp
-        });
-        socket
-            .send(Message::Text(json_offer.to_string()))
-            .await
-            .unwrap();
-    }
 
     // Handle incoming messages from WebSocket (Answer, ICE Candidates)
-    while let Some(msg) = socket.recv().await {
+    while let Some(msg) = receiver.next().await {
         if let Ok(Message::Text(text)) = msg {
             let json: serde_json::Value = serde_json::from_str(&text).unwrap();
             let type_ = json["type"].as_str().unwrap();
 
             info!("Received message in signaling: {}", json);
             match type_ {
-                "answer" => {
+                "offer" => {
                     let sdp = json["sdp"].as_str().unwrap();
-                    let remote_desc = RTCSessionDescription::answer(sdp.to_string()).unwrap();
+                    let remote_desc = RTCSessionDescription::offer(sdp.to_string()).unwrap();
                     peer_connection
                         .set_remote_description(remote_desc)
                         .await
                         .unwrap();
+
+                    let answer = peer_connection.create_answer(None).await.unwrap();
+                    peer_connection.set_local_description(answer).await.unwrap();
+
+                    if let Some(local_desc) = peer_connection.local_description().await {
+                        let json_answer = serde_json::json!({
+                            "type": "answer",
+                            "sdp": local_desc.sdp
+                        });
+                        let _ = tx.send(json_answer.to_string());
+                    }
                 }
                 "candidate" => {
                     if let Some(candidate) = json["candidate"].as_object() {
