@@ -131,7 +131,7 @@ pub async fn create_peer_connection(
                  .build()
                  .map_err(|e| anyhow!("Failed to create enc: {}", e))?;
             enc.set_property_from_str("error-resilient", "partitions");
-            enc.set_property("key-frame-max-dist", 2000i32);
+            enc.set_property("keyframe-max-dist", 2000i32);
             enc.set_property("deadline", 1i64);
 
             let pay = gst::ElementFactory::make("rtpvp8pay")
