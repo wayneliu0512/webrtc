@@ -5,10 +5,11 @@ use axum::{
 use futures::SinkExt;
 use futures::stream::StreamExt;
 use tracing::info;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::webrtc::create_peer_connection;
+use edge_lib::protocol::text::signal::{WebRtcSignalChannel, WebRtcSignalChannelType};
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(handle_socket)
@@ -40,19 +41,18 @@ async fn handle_socket(socket: WebSocket) {
     // Handle incoming messages from WebSocket (Answer, ICE Candidates)
     while let Some(msg) = receiver.next().await {
         if let Ok(Message::Text(text)) = msg {
-            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-            let type_ = match json["type"].as_str() {
-                Some(t) => t,
-                None => {
-                    info!("Received message without type: {}", json);
+            let signal: WebRtcSignalChannel = match serde_json::from_str(&text) {
+                Ok(s) => s,
+                Err(e) => {
+                    info!("Received invalid message: {} error: {}", text, e);
                     continue;
                 }
             };
 
-            info!("Received message in signaling: {}", json);
-            match type_ {
-                "offer" => {
-                    let sdp = json["sdp"].as_str().unwrap();
+            info!("Received message in signaling: {:?}", signal);
+            match signal.type_ {
+                WebRtcSignalChannelType::Offer => {
+                    let sdp = signal.sdp;
                     let remote_desc = RTCSessionDescription::offer(sdp.to_string()).unwrap();
                     peer_connection
                         .set_remote_description(remote_desc)
@@ -66,23 +66,11 @@ async fn handle_socket(socket: WebSocket) {
                     info!("Gathering complete");
 
                     if let Some(local_desc) = peer_connection.local_description().await {
-                        let json_answer = serde_json::json!({
-                            "type": "answer",
-                            "sdp": local_desc.sdp
-                        });
-                        let _ = tx.send(json_answer.to_string());
-                    }
-                }
-                "candidate" => {
-                    if let Some(candidate) = json["candidate"].as_object() {
-                        let candidate_init = serde_json::from_value::<RTCIceCandidateInit>(
-                            serde_json::Value::Object(candidate.clone()),
-                        )
-                        .unwrap();
-                        peer_connection
-                            .add_ice_candidate(candidate_init)
-                            .await
-                            .unwrap();
+                        let json_answer = WebRtcSignalChannel {
+                            type_: WebRtcSignalChannelType::Answer,
+                            sdp: local_desc.sdp,
+                        };
+                        let _ = tx.send(serde_json::to_string(&json_answer).unwrap());
                     }
                 }
                 _ => {}
