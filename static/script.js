@@ -87,7 +87,7 @@ async function init() {
     };
 
     // Create Data Channel (Frontend is Offerer)
-    const dataChannel = pc.createDataChannel("data");
+    const dataChannel = pc.createDataChannel("data", { ordered: false, maxRetransmits: 0 });
     setupDataChannel(dataChannel);
 
     log("Connecting to WebSocket...");
