@@ -5,6 +5,7 @@ use tower_http::services::ServeDir;
 use tracing::info;
 
 mod handlers;
+mod portal;
 mod webrtc;
 
 use handlers::ws_handler;

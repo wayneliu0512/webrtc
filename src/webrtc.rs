@@ -13,11 +13,19 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
+use crate::portal;
+use std::os::fd::AsRawFd;
+use gstreamer::prelude::*;
+use gstreamer as gst;
+use gstreamer_app as gst_app;
+use anyhow::anyhow;
+use webrtc::rtp::packet::Packet;
+use webrtc::util::Unmarshal;
 
 pub async fn create_peer_connection(
     tx: UnboundedSender<String>,
@@ -70,28 +78,130 @@ pub async fn create_peer_connection(
         .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
 
-    // Register on_track handler for loopback
-    let local_track_clone = local_track.clone();
+    // Register on_track handler - we don't expect remote tracks for screencast, 
+    // but keep it for debugging or future requirements if needed.
     peer_connection.on_track(Box::new(
         move |track: Arc<TrackRemote>, _receiver: Arc<RTCRtpReceiver>, _transceiver| {
-            let local_track = local_track_clone.clone();
             Box::pin(async move {
                 info!("Track {} received", track.id());
-                if track.kind() == RTPCodecType::Video {
-                    info!("Video track received! Starting loopback...");
-                    // Loopback loop
-                    tokio::spawn(async move {
-                        while let Ok((rtp, _)) = track.read_rtp().await {
-                            if let Err(e) = local_track.write_rtp(&rtp).await {
-                                info!("Failed to write RTP: {}", e);
-                                break;
-                            }
-                        }
-                    });
-                }
             })
         },
     ));
+
+    // Spawn the screencast source task
+    let local_track_clone = local_track.clone();
+    let peer_connection_clone = Arc::downgrade(&peer_connection);
+    
+    tokio::spawn(async move {
+        let task = async move {
+            info!("Starting screencast setup...");
+            
+            // Initialize GStreamer
+            gst::init().map_err(|e| anyhow!("Failed to init GStreamer: {}", e))?;
+
+            // Open Portal
+            info!("Requesting portal access...");
+            let (session, stream, fd) = portal::open_portal().await
+                .map_err(|e| anyhow!("Failed to open portal: {}", e))?;
+
+            // pipe_wire_node_id might be the correct field/method.
+            // pipe_wire_node_id is a field in ashpd 0.9 Stream struct
+            let node_id = stream.pipe_wire_node_id();
+            let fd_raw = fd.as_raw_fd();
+            info!("Got portal stream: node_id={}, fd={}", node_id, fd_raw);
+
+            // Construct pipeline
+            // pipewiresrc needs fd to be valid during the pipeline lifecycle. 
+            // We pass fd index, but we must keep `fd` (OrderedFd) alive.
+            // Also ensure high-quality, low-latency encoding.
+            let pipeline = gst::Pipeline::new();
+
+            let src = gst::ElementFactory::make("pipewiresrc")
+                .build()
+                .map_err(|e| anyhow!("Failed to create src: {}", e))?;
+            src.set_property("fd", fd_raw);
+            src.set_property("path", &node_id.to_string());
+            src.set_property("always-copy", true);
+
+            let conv = gst::ElementFactory::make("videoconvert")
+                .build()
+                .map_err(|e| anyhow!("Failed to create conv: {}", e))?;
+
+            let enc = gst::ElementFactory::make("vp8enc")
+                 .build()
+                 .map_err(|e| anyhow!("Failed to create enc: {}", e))?;
+            enc.set_property_from_str("error-resilient", "partitions");
+            enc.set_property("key-frame-max-dist", 2000i32);
+            enc.set_property("deadline", 1i64);
+
+            let pay = gst::ElementFactory::make("rtpvp8pay")
+                 .build()
+                 .map_err(|e| anyhow!("Failed to create pay: {}", e))?;
+
+            let sink = gst::ElementFactory::make("appsink")
+                 .build()
+                 .map_err(|e| anyhow!("Failed to create sink: {}", e))?;
+
+            pipeline.add_many(&[&src, &conv, &enc, &pay, &sink])
+                .map_err(|e| anyhow!("Failed to add elements: {}", e))?;
+
+            gst::Element::link_many(&[&src, &conv, &enc, &pay, &sink])
+                .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
+
+            let appsink = sink.downcast::<gst_app::AppSink>()
+                .map_err(|_| anyhow!("Failed to cast appsink"))?;
+
+            // Start pipeline
+            pipeline.set_state(gst::State::Playing)
+                .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
+            
+            info!("Pipeline playing");
+
+            // Loop to pull samples
+            loop {
+                // Check if peer connection is still alive
+                 if peer_connection_clone.upgrade().is_none() {
+                    break;
+                }
+
+                match appsink.pull_sample() {
+                    Ok(sample) => {
+                        let buffer: &gst::BufferRef = match sample.buffer() {
+                            Some(b) => b,
+                            None => continue,
+                        };
+
+                        if let Ok(map) = buffer.map_readable() {
+                            let mut buf: &[u8] = &map;
+                            // Parse RTP packet
+                            if let Ok(packet) = Packet::unmarshal(&mut buf) {
+                                if let Err(e) = local_track_clone.write_rtp(&packet).await {
+                                    tracing::error!("Failed to write RTP: {}", e);
+                                    if e.to_string().contains("closed") {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        // EOS or error
+                        break;
+                    }
+                }
+            }
+            
+            // Screencast task ending, cleaning up...
+            let _ = pipeline.set_state(gst::State::Null);
+            let _ = session.close().await;
+            // fd drops here, which is fine as pipeline is stopped
+            Ok::<(), anyhow::Error>(())
+        };
+
+        if let Err(e) = task.await {
+            info!("Screencast task encountered error: {}", e);
+        }
+    });
 
     // Register data channel creation handling
     peer_connection.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
