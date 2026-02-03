@@ -24,6 +24,7 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use crate::portal;
 
@@ -46,9 +47,23 @@ pub async fn create_peer_connection(
 
     // 3. Create and Add Local Video Track
     let local_track = create_local_track();
-    peer_connection
+    let rtp_sender = peer_connection
         .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
+
+    // Read incoming RTCP packets
+    // Before these packets are returned they are processed by interceptors. For things
+    // like NACK this needs to be called.
+    let (pli_tx, pli_rx) = unbounded_channel();
+    tokio::spawn(async move {
+        let mut rtcp_buf = vec![0u8; 1500];
+        while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {
+            // For now, we just blindly forward any RTCP packet as a PLI signal
+            // In a real app you might parse it to ensure strictly PLI or FIR.
+            // But usually the browser only sends RTCP for these reasons on a video sender.
+            let _ = pli_tx.send(());
+        }
+    });
 
     // 4. Register Handlers
     // Handle incoming tracks (Placeholder for now)
@@ -68,7 +83,7 @@ pub async fn create_peer_connection(
     // We pass a Weak reference to the PC so the screencast loop can stop if PC is dropped/closed.
     let pc_weak = Arc::downgrade(&peer_connection);
     tokio::spawn(async move {
-        if let Err(e) = run_screencast_loop(local_track, pc_weak).await {
+        if let Err(e) = run_screencast_loop(local_track, pc_weak, pli_rx).await {
             info!("Screencast task encountered error: {}", e);
         }
     });
@@ -201,6 +216,7 @@ fn setup_connection_state_handling(pc: &Arc<RTCPeerConnection>) {
 async fn run_screencast_loop(
     local_track: Arc<TrackLocalStaticRTP>,
     pc_weak: Weak<RTCPeerConnection>,
+    mut pli_rx: UnboundedReceiver<()>,
 ) -> Result<()> {
     info!("Starting screencast setup...");
     
@@ -234,8 +250,20 @@ async fn run_screencast_loop(
             .build()
             .map_err(|e| anyhow!("Failed to create enc: {}", e))?;
     enc.set_property_from_str("error-resilient", "partitions");
-    enc.set_property("keyframe-max-dist", 2000i32);
+    enc.set_property("keyframe-max-dist", 60i32); // Send a keyframe every ~2s
     enc.set_property("deadline", 1i64);
+
+    // Listen for PLI from WebRTC and force keyframe
+    let enc_clone = enc.clone();
+    tokio::spawn(async move {
+        while let Some(_) = pli_rx.recv().await {
+            tracing::trace!("Received PLI, forcing keyframe");
+            let mut structure = gst::Structure::new_empty("GstForceKeyUnit");
+            structure.set("all-headers", true);
+            let event = gst::event::CustomUpstream::new(structure);
+            enc_clone.send_event(event);
+        }
+    });
 
     let pay = gst::ElementFactory::make("rtpvp8pay")
             .build()
