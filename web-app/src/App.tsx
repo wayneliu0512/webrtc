@@ -17,7 +17,6 @@ const theme = createTheme({
 
 function App() {
   const {
-    localStream,
     remoteStream,
     logs,
     connectionStatus,
@@ -30,7 +29,7 @@ function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Container maxWidth="md" sx={{ py: 4 }}>
+      <Container maxWidth={false} disableGutters sx={{ py: 4 }}>
         <Typography variant="h4" component="h1" gutterBottom sx={{ mb: 4 }}>
           Rust WebRTC Demo (React)
         </Typography>
@@ -42,7 +41,7 @@ function App() {
           isConnecting={isConnecting}
         />
 
-        <VideoDisplay localStream={localStream} remoteStream={remoteStream} />
+        <VideoDisplay remoteStream={remoteStream} />
 
         <ChatPanel
           sendMessage={sendMessage}
