@@ -1,10 +1,15 @@
 import { useState, useRef, useCallback } from "react";
 
+export type ConnectionStatus =
+  | "Disconnected"
+  | "Signaling Connected"
+  | "WebRTC Connected";
+
 export interface UseWebRTC {
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   logs: string[];
-  connectionStatus: string;
+  connectionStatus: ConnectionStatus;
   isConnecting: boolean;
   connect: () => Promise<void>;
   sendMessage: (msg: string) => void;
@@ -16,7 +21,7 @@ export const useWebRTC = (): UseWebRTC => {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [connectionStatus, setConnectionStatus] =
-    useState<string>("Disconnected");
+    useState<ConnectionStatus>("Disconnected");
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -39,9 +44,8 @@ export const useWebRTC = (): UseWebRTC => {
       wsRef.current.close();
       wsRef.current = null;
     }
-    if (dcRef.current) {
-      dcRef.current = null;
-    }
+    dcRef.current = null;
+
     setLocalStream((prev) => {
       if (prev) {
         prev.getTracks().forEach((track) => track.stop());
@@ -53,20 +57,95 @@ export const useWebRTC = (): UseWebRTC => {
     setIsConnecting(false);
   }, []);
 
+  const initLocalStream = useCallback(async () => {
+    addLog("Getting User Media...");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false,
+      });
+      setLocalStream(stream);
+      return stream;
+    } catch (err) {
+      addLog("Error getting user media: " + err);
+      throw err;
+    }
+  }, [addLog]);
+
+  const initPeerConnection = useCallback(
+    (stream: MediaStream) => {
+      const pc = new RTCPeerConnection({
+        // iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+
+      stream.getTracks().forEach((track) => {
+        addLog(`Adding track: ${track.id}`);
+        pc.addTrack(track, stream);
+      });
+
+      pc.ontrack = (event) => {
+        addLog("Track received");
+        if (event.streams && event.streams[0]) {
+          setRemoteStream(event.streams[0]);
+        } else {
+          const inboundStream = new MediaStream();
+          inboundStream.addTrack(event.track);
+          setRemoteStream(inboundStream);
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          addLog("OnIceCandidate: " + event.candidate.candidate);
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        addLog(`PC State: ${pc.connectionState}`);
+      };
+
+      pcRef.current = pc;
+      return pc;
+    },
+    [addLog],
+  );
+
   const setupDataChannel = useCallback(
-    (channel: RTCDataChannel) => {
-      dcRef.current = channel;
-      channel.onopen = () => {
+    (pc: RTCPeerConnection) => {
+      const channel = pc.createDataChannel("data", {
+        ordered: false,
+        maxRetransmits: 0,
+      });
+
+      const handleOpen = () => {
         addLog("DataChannel OPEN!");
         setConnectionStatus("WebRTC Connected");
         setIsConnecting(false);
       };
-      channel.onmessage = (event) => {
+
+      const handleMessage = (event: MessageEvent) => {
         addLog(`Received (DC): ${event.data}`);
       };
-      channel.onclose = () => {
+
+      const handleClose = () => {
         addLog("DataChannel CLOSED");
         cleanup();
+      };
+
+      channel.onopen = handleOpen;
+      channel.onmessage = handleMessage;
+      channel.onclose = handleClose;
+
+      dcRef.current = channel;
+
+      // Also handle incoming data channels if needed (though we create it here)
+      pc.ondatachannel = (event) => {
+        addLog(`DataChannel received: ${event.channel.label}`);
+        const rxChannel = event.channel;
+        rxChannel.onopen = handleOpen;
+        rxChannel.onmessage = handleMessage;
+        rxChannel.onclose = handleClose;
+        dcRef.current = rxChannel;
       };
     },
     [addLog, cleanup],
@@ -98,70 +177,8 @@ export const useWebRTC = (): UseWebRTC => {
     [addLog],
   );
 
-  const connect = useCallback(async () => {
-    if (isConnecting || connectionStatus === "WebRTC Connected") return;
-
-    setIsConnecting(true);
-    addLog("Getting User Media...");
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: false,
-      });
-      setLocalStream(stream);
-
-      const pc = new RTCPeerConnection({
-        // iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      pcRef.current = pc;
-
-      stream.getTracks().forEach((track) => {
-        addLog(`Adding track: ${track.id}`);
-        pc.addTrack(track, stream);
-      });
-
-      pc.ontrack = (event) => {
-        addLog("Track received");
-        if (event.streams && event.streams[0]) {
-          setRemoteStream(event.streams[0]);
-        } else {
-          const inboundStream = new MediaStream();
-          inboundStream.addTrack(event.track);
-          setRemoteStream(inboundStream);
-        }
-      };
-
-      pc.onicecandidate = (event) => {
-        if (event.candidate) {
-          addLog("OnIceCandidate: " + event.candidate.candidate);
-          // In a full implementation, we might send this immediately if using trickle ICE,
-          // but the original code gathered all then sent offer.
-          // However, the original code had a handler that printed it.
-          // The signaling logic below handles sending "candidate" messages if needed,
-          // OR the main offer logic waits for gathering complete.
-          // Original code: sendOffer() is called after 'complete'.
-        }
-      };
-
-      pc.onconnectionstatechange = async () => {
-        addLog(`PC State: ${pc.connectionState}`);
-        if (pc.connectionState === "connected") {
-          // Stats logic omitted for brevity, but can be added back if needed
-        }
-      };
-
-      pc.ondatachannel = (event) => {
-        addLog(`DataChannel received: ${event.channel.label}`);
-        setupDataChannel(event.channel);
-      };
-
-      const dataChannel = pc.createDataChannel("data", {
-        ordered: false,
-        maxRetransmits: 0,
-      });
-      setupDataChannel(dataChannel);
-
+  const initWebSocket = useCallback(
+    (pc: RTCPeerConnection) => {
       addLog("Connecting to WebSocket...");
       const ws = new WebSocket(`ws://${location.host}/ws`);
       wsRef.current = ws;
@@ -191,17 +208,32 @@ export const useWebRTC = (): UseWebRTC => {
         addLog("WebSocket closed");
         cleanup();
       };
-    } catch (err) {
-      addLog("Error getting user media: " + err);
+    },
+    [addLog, cleanup, createAndSendOffer],
+  );
+
+  const connect = useCallback(async () => {
+    if (isConnecting || connectionStatus === "WebRTC Connected") return;
+
+    setIsConnecting(true);
+
+    try {
+      const stream = await initLocalStream();
+      const pc = initPeerConnection(stream);
+      setupDataChannel(pc);
+      initWebSocket(pc);
+    } catch (e) {
+      console.error(e);
       cleanup();
     }
   }, [
-    addLog,
-    cleanup,
-    setupDataChannel,
     isConnecting,
     connectionStatus,
-    createAndSendOffer,
+    cleanup,
+    initLocalStream,
+    initPeerConnection,
+    setupDataChannel,
+    initWebSocket,
   ]);
 
   const sendMessage = useCallback(
