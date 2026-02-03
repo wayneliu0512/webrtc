@@ -1604,6 +1604,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
 
 [[package]]
+name = "my_webrtc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ashpd",
+ "axum",
+ "edge-lib",
+ "futures",
+ "gstreamer",
+ "gstreamer-app",
+ "gstreamer-video",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "webrtc",
+]
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3178,28 +3200,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webrtc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ashpd",
- "axum",
- "edge-lib",
- "futures",
- "gstreamer",
- "gstreamer-app",
- "gstreamer-video",
- "serde",
- "serde_json",
- "tokio",
- "tower 0.4.13",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "webrtc 0.10.1",
 ]
 
 [[package]]

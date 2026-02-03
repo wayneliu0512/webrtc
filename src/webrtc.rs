@@ -84,7 +84,7 @@ pub async fn create_peer_connection(
     let pc_weak = Arc::downgrade(&peer_connection);
     tokio::spawn(async move {
         if let Err(e) = run_screencast_loop(local_track, pc_weak, pli_rx).await {
-            info!("Screencast task encountered error: {}", e);
+            error!("Screencast task encountered error: {}", e);
         }
     });
 
