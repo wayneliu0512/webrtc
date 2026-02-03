@@ -180,7 +180,7 @@ export const useWebRTC = (): UseWebRTC => {
   const initWebSocket = useCallback(
     (pc: RTCPeerConnection) => {
       addLog("Connecting to WebSocket...");
-      const ws = new WebSocket(`ws://${location.host}/ws`);
+      const ws = new WebSocket(`ws://10.88.17.213:8080/ws`);
       wsRef.current = ws;
 
       ws.onopen = () => {
