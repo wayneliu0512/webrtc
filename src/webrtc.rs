@@ -263,7 +263,13 @@ async fn run_remote_desktop_loop(
                      portal_input.notify_pointer_motion(dx, dy).await
                 }
                 InputEvent::PointerButton { button, pressed } => {
-                     portal_input.notify_pointer_button(button, pressed).await
+                    let btn = match button {
+                        0 => 272, // BTN_LEFT
+                        1 => 274, // BTN_MIDDLE
+                        2 => 273, // BTN_RIGHT
+                        other => other,
+                    };
+                     portal_input.notify_pointer_button(btn, pressed).await
                 }
                 InputEvent::Scroll { steps_x, steps_y } => {
                      portal_input.notify_scroll_discrete(steps_x, steps_y).await
