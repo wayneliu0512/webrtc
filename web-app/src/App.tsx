@@ -23,8 +23,8 @@ function App() {
     isConnecting,
     connect,
     disconnect,
-    sendMessage,
     sendInputEvent,
+    sendClipboard,
   } = useWebRTC();
 
   return (
@@ -45,7 +45,7 @@ function App() {
         <VideoDisplay remoteStream={remoteStream} onInput={sendInputEvent} />
 
         <ChatPanel
-          sendMessage={sendMessage}
+          sendClipboard={sendClipboard}
           isConnected={connectionStatus === "WebRTC Connected"}
         />
 
