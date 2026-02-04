@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import type { InputEvent } from "../types/InputEvent";
 
 export type ConnectionStatus =
   | "Disconnected"
@@ -12,6 +13,7 @@ export interface UseWebRTC {
   isConnecting: boolean;
   connect: () => Promise<void>;
   sendMessage: (msg: string) => void;
+  sendInputEvent: (event: InputEvent) => void;
   disconnect: () => void;
 }
 
@@ -215,6 +217,12 @@ export const useWebRTC = (): UseWebRTC => {
     [addLog],
   );
 
+  const sendInputEvent = useCallback((event: InputEvent) => {
+    if (dcRef.current && dcRef.current.readyState === "open") {
+      dcRef.current.send(JSON.stringify(event));
+    }
+  }, []);
+
   return {
     remoteStream,
     logs,
@@ -222,6 +230,7 @@ export const useWebRTC = (): UseWebRTC => {
     isConnecting,
     connect,
     sendMessage,
+    sendInputEvent,
     disconnect: cleanup,
   };
 };
