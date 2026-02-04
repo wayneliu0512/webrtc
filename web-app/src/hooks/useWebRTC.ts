@@ -15,10 +15,13 @@ export interface UseWebRTC {
   sendMessage: (msg: string) => void;
   sendInputEvent: (event: InputEvent) => void;
   sendClipboard: (text: string) => void;
+  sendClipboardGet: () => void;
   disconnect: () => void;
 }
 
-export const useWebRTC = (): UseWebRTC => {
+export const useWebRTC = (
+  onClipboardReceived?: (text: string) => void,
+): UseWebRTC => {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [connectionStatus, setConnectionStatus] =
@@ -101,6 +104,9 @@ export const useWebRTC = (): UseWebRTC => {
           if (msg.clipboard) {
             if (msg.clipboard.text) {
               addLog(`Received Clipboard: ${msg.clipboard.text}`);
+              if (onClipboardReceived) {
+                onClipboardReceived(msg.clipboard.text);
+              }
             } else {
               addLog(
                 `Received Clipboard event: ${JSON.stringify(msg.clipboard)}`,
@@ -135,7 +141,7 @@ export const useWebRTC = (): UseWebRTC => {
         dcRef.current = rxChannel;
       };
     },
-    [addLog, cleanup],
+    [addLog, cleanup, onClipboardReceived],
   );
 
   const createAndSendOffer = useCallback(
@@ -249,6 +255,13 @@ export const useWebRTC = (): UseWebRTC => {
     [addLog],
   );
 
+  const sendClipboardGet = useCallback(() => {
+    if (dcRef.current && dcRef.current.readyState === "open") {
+      dcRef.current.send(JSON.stringify({ clipboard: "gettext" }));
+      addLog(`Sent Clipboard GetText`);
+    }
+  }, [addLog]);
+
   return {
     remoteStream,
     logs,
@@ -258,6 +271,7 @@ export const useWebRTC = (): UseWebRTC => {
     sendMessage,
     sendInputEvent,
     sendClipboard,
+    sendClipboardGet,
     disconnect: cleanup,
   };
 };

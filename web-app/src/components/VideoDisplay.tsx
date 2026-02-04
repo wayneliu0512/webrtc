@@ -6,9 +6,14 @@ import { getEvdevKeycode } from "../utils/evdev";
 interface VideoDisplayProps {
   remoteStream: MediaStream | null;
   onInput?: (event: InputEvent) => void;
+  onLockChange?: (locked: boolean) => void;
 }
 
-export const VideoDisplay = ({ remoteStream, onInput }: VideoDisplayProps) => {
+export const VideoDisplay = ({
+  remoteStream,
+  onInput,
+  onLockChange,
+}: VideoDisplayProps) => {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const [isLocked, setIsLocked] = useState(false);
 
@@ -17,6 +22,8 @@ export const VideoDisplay = ({ remoteStream, onInput }: VideoDisplayProps) => {
       remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [remoteStream]);
+
+  // ... (handleMouseMove, etc. unchanged)
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
@@ -112,6 +119,7 @@ export const VideoDisplay = ({ remoteStream, onInput }: VideoDisplayProps) => {
     const handleLockChange = () => {
       if (document.pointerLockElement === remoteVideoRef.current) {
         setIsLocked(true);
+        if (onLockChange) onLockChange(true);
         document.addEventListener("mousemove", handleMouseMove);
         document.addEventListener("mousedown", handleMouseDown);
         document.addEventListener("mouseup", handleMouseUp);
@@ -120,6 +128,7 @@ export const VideoDisplay = ({ remoteStream, onInput }: VideoDisplayProps) => {
         document.addEventListener("keyup", handleKeyUp);
       } else {
         setIsLocked(false);
+        if (onLockChange) onLockChange(false);
         document.removeEventListener("mousemove", handleMouseMove);
         document.removeEventListener("mousedown", handleMouseDown);
         document.removeEventListener("mouseup", handleMouseUp);

@@ -6,16 +6,16 @@ interface ChatPanelProps {
   // Use "sendMessage" prop name to minimize changes in App.tsx if desired, or rename it.
   // Given instructions said "Modify ChatPanel.tsx to use sendClipboardEvent instead of chat message",
   // I will rename the prop to be explicit as per plan.
-  sendClipboard: (msg: string) => void;
+  sendMessage: (msg: string) => void;
   isConnected: boolean;
 }
 
-export const ChatPanel = ({ sendClipboard, isConnected }: ChatPanelProps) => {
+export const ChatPanel = ({ sendMessage, isConnected }: ChatPanelProps) => {
   const [message, setMessage] = useState("");
 
   const handleSend = () => {
     if (message.trim()) {
-      sendClipboard(message);
+      sendMessage(message);
       setMessage("");
     }
   };
@@ -26,7 +26,7 @@ export const ChatPanel = ({ sendClipboard, isConnected }: ChatPanelProps) => {
         <TextField
           fullWidth
           variant="outlined"
-          placeholder="Type text to set on remote clipboard..."
+          placeholder="Type a message..."
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           disabled={!isConnected}
@@ -41,7 +41,7 @@ export const ChatPanel = ({ sendClipboard, isConnected }: ChatPanelProps) => {
           onClick={handleSend}
           disabled={!isConnected || !message.trim()}
         >
-          Set Remote Clipboard
+          Send
         </Button>
       </Stack>
     </Paper>

@@ -1,3 +1,4 @@
+import { useState, useCallback } from "react";
 import { Container, Typography, CssBaseline } from "@mui/material";
 import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { useWebRTC } from "./hooks/useWebRTC";
@@ -5,6 +6,7 @@ import { ControlPanel } from "./components/ControlPanel";
 import { VideoDisplay } from "./components/VideoDisplay";
 import { ChatPanel } from "./components/ChatPanel";
 import { LogViewer } from "./components/LogViewer";
+import { ClipboardSimulator } from "./components/ClipboardSimulator";
 
 const theme = createTheme({
   palette: {
@@ -16,6 +18,12 @@ const theme = createTheme({
 });
 
 function App() {
+  const [localClipboard, setLocalClipboard] = useState("");
+
+  const handleClipboardReceived = useCallback((text: string) => {
+    setLocalClipboard(text);
+  }, []);
+
   const {
     remoteStream,
     logs,
@@ -23,9 +31,24 @@ function App() {
     isConnecting,
     connect,
     disconnect,
+    sendMessage,
     sendInputEvent,
     sendClipboard,
-  } = useWebRTC();
+    sendClipboardGet,
+  } = useWebRTC(handleClipboardReceived);
+
+  const handleLockChange = useCallback(
+    (locked: boolean) => {
+      if (locked) {
+        // Entered remote control -> Send local clipboard to remote
+        sendClipboard(localClipboard);
+      } else {
+        // Exited remote control -> Fetch remote clipboard to local
+        sendClipboardGet();
+      }
+    },
+    [localClipboard, sendClipboard, sendClipboardGet],
+  );
 
   return (
     <ThemeProvider theme={theme}>
@@ -42,10 +65,19 @@ function App() {
           isConnecting={isConnecting}
         />
 
-        <VideoDisplay remoteStream={remoteStream} onInput={sendInputEvent} />
+        <VideoDisplay
+          remoteStream={remoteStream}
+          onInput={sendInputEvent}
+          onLockChange={handleLockChange}
+        />
+
+        <ClipboardSimulator
+          value={localClipboard}
+          onChange={setLocalClipboard}
+        />
 
         <ChatPanel
-          sendClipboard={sendClipboard}
+          sendMessage={(msg) => sendMessage(msg)} // Revert ChatPanel to just be chat/log for now as requested
           isConnected={connectionStatus === "WebRTC Connected"}
         />
 
