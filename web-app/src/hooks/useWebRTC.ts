@@ -12,7 +12,6 @@ export interface UseWebRTC {
   connectionStatus: ConnectionStatus;
   isConnecting: boolean;
   connect: () => Promise<void>;
-  sendMessage: (msg: string) => void;
   sendInputEvent: (event: InputEvent) => void;
   sendClipboard: (text: string) => void;
   sendClipboardGet: () => void;
@@ -227,18 +226,6 @@ export const useWebRTC = (
     initWebSocket,
   ]);
 
-  const sendMessage = useCallback(
-    (msg: string) => {
-      if (dcRef.current && dcRef.current.readyState === "open") {
-        dcRef.current.send(msg);
-        addLog(`Sent (DC): ${msg}`);
-      } else {
-        addLog("DataChannel not open");
-      }
-    },
-    [addLog],
-  );
-
   const sendInputEvent = useCallback((event: InputEvent) => {
     if (dcRef.current && dcRef.current.readyState === "open") {
       dcRef.current.send(JSON.stringify({ inputevent: event }));
@@ -268,7 +255,6 @@ export const useWebRTC = (
     connectionStatus,
     isConnecting,
     connect,
-    sendMessage,
     sendInputEvent,
     sendClipboard,
     sendClipboardGet,

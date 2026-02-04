@@ -4,7 +4,6 @@ import { createTheme, ThemeProvider } from "@mui/material/styles";
 import { useWebRTC } from "./hooks/useWebRTC";
 import { ControlPanel } from "./components/ControlPanel";
 import { VideoDisplay } from "./components/VideoDisplay";
-import { ChatPanel } from "./components/ChatPanel";
 import { LogViewer } from "./components/LogViewer";
 import { ClipboardSimulator } from "./components/ClipboardSimulator";
 
@@ -39,7 +38,6 @@ function App() {
     isConnecting,
     connect,
     disconnect,
-    sendMessage,
     sendInputEvent,
     sendClipboard,
     sendClipboardGet,
@@ -75,23 +73,18 @@ function App() {
           isConnecting={isConnecting}
         />
 
-        <VideoDisplay
-          remoteStream={remoteStream}
-          onInput={sendInputEvent}
-          onLockChange={handleLockChange}
-        />
-
         <ClipboardSimulator
           value={localClipboard}
           onChange={handleLocalClipboardChange}
         />
 
-        <ChatPanel
-          sendMessage={(msg) => sendMessage(msg)} // Revert ChatPanel to just be chat/log for now as requested
-          isConnected={connectionStatus === "WebRTC Connected"}
-        />
-
         <LogViewer logs={logs} />
+
+        <VideoDisplay
+          remoteStream={remoteStream}
+          onInput={sendInputEvent}
+          onLockChange={handleLockChange}
+        />
       </Container>
     </ThemeProvider>
   );
