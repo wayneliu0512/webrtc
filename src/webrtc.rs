@@ -25,6 +25,8 @@ use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+
 
 use crate::portal::{self, PortalInput};
 use edge_lib::protocol::webrtc::input_event::InputEvent;
@@ -52,21 +54,22 @@ pub async fn create_peer_connection(
         .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
         .await?;
 
-    // Read incoming RTCP packets
-    // Before these packets are returned they are processed by interceptors. For things
-    // like NACK this needs to be called.
-    let (pli_tx, pli_rx) = unbounded_channel();
-    let (input_tx, input_rx) = unbounded_channel::<InputEvent>();
+    let (pli_tx, pli_rx) = unbounded_channel::<()>();
 
+    // Spawn RTCP Reader for PLI
+    let rtp_sender_clone = rtp_sender.clone();
     tokio::spawn(async move {
         let mut rtcp_buf = vec![0u8; 1500];
-        while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {
-            // For now, we just blindly forward any RTCP packet as a PLI signal
-            // In a real app you might parse it to ensure strictly PLI or FIR.
-            // But usually the browser only sends RTCP for these reasons on a video sender.
-            let _ = pli_tx.send(());
+        while let Ok((packets, _)) = rtp_sender_clone.read(&mut rtcp_buf).await {
+            for packet in packets {
+                if packet.as_any().downcast_ref::<PictureLossIndication>().is_some() {
+                    let _ = pli_tx.send(());
+                }
+            }
         }
     });
+
+    let (input_tx, input_rx) = unbounded_channel::<InputEvent>();
 
     // 4. Register Handlers
     // Handle incoming tracks (Placeholder for now)
@@ -120,7 +123,6 @@ fn create_local_track() -> Arc<TrackLocalStaticRTP> {
     ))
 }
 
-/// Sets up Data Channel handlers (e.g. for Echo).
 /// Sets up Data Channel handlers.
 fn setup_data_channel_handling(
     pc: &Arc<RTCPeerConnection>,
@@ -300,24 +302,29 @@ async fn run_remote_desktop_loop(
         .build()
         .map_err(|e| anyhow!("Failed to create conv: {}", e))?;
 
+    let queue = gst::ElementFactory::make("queue")
+        .build()
+        .map_err(|e| anyhow!("Failed to create queue: {}", e))?;
+    queue.set_property("max-size-buffers", 1u32);
+    queue.set_property("max-size-bytes", 0u32);
+    queue.set_property("max-size-time", 0u64);
+    queue.set_property_from_str("leaky", "downstream"); // 2 = downstream (drop old)
+
     let enc = gst::ElementFactory::make("vp8enc")
             .build()
             .map_err(|e| anyhow!("Failed to create enc: {}", e))?;
     enc.set_property_from_str("error-resilient", "partitions");
-    enc.set_property("keyframe-max-dist", 60i32); // Send a keyframe every ~2s
-    enc.set_property("deadline", 1i64);
-
-    // Listen for PLI from WebRTC and force keyframe
-    let enc_clone = enc.clone();
-    tokio::spawn(async move {
-        while let Some(_) = pli_rx.recv().await {
-            tracing::trace!("Received PLI, forcing keyframe");
-            let mut structure = gst::Structure::new_empty("GstForceKeyUnit");
-            structure.set("all-headers", true);
-            let event = gst::event::CustomUpstream::new(structure);
-            enc_clone.send_event(event);
-        }
-    });
+    enc.set_property("keyframe-max-dist", 2000i32);
+    enc.set_property("deadline", 1i64); // Realtime
+    enc.set_property("cpu-used", 16i32);
+    enc.set_property("threads", 16i32);
+    enc.set_property_from_str("end-usage", "cbr");
+    enc.set_property("target-bitrate", 2_000_000i32); // 2 Mbps
+    enc.set_property("buffer-size", 100i32);
+    enc.set_property("buffer-initial-size", 50i32);
+    enc.set_property("buffer-optimal-size", 80i32);
+    enc.set_property("lag-in-frames", 0i32);
+    enc.set_property_from_str("token-partitions", "8"); // 8 partitions, enables multi-threaded decoding on client
 
     let pay = gst::ElementFactory::make("rtpvp8pay")
             .build()
@@ -326,11 +333,13 @@ async fn run_remote_desktop_loop(
     let sink = gst::ElementFactory::make("appsink")
             .build()
             .map_err(|e| anyhow!("Failed to create sink: {}", e))?;
+    sink.set_property("sync", false);
+    sink.set_property("drop", true);
 
-    pipeline.add_many(&[&src, &conv, &enc, &pay, &sink])
+    pipeline.add_many(&[&src, &conv, &queue, &enc, &pay, &sink])
         .map_err(|e| anyhow!("Failed to add elements: {}", e))?;
 
-    gst::Element::link_many(&[&src, &conv, &enc, &pay, &sink])
+    gst::Element::link_many(&[&src, &conv, &queue, &enc, &pay, &sink])
         .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
 
     let appsink = sink.downcast::<gst_app::AppSink>()
@@ -341,6 +350,22 @@ async fn run_remote_desktop_loop(
         .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
     
     info!("Pipeline playing");
+
+    // Spawn PLI handler
+    let pipeline_weak = pipeline.downgrade();
+    tokio::spawn(async move {
+        while let Some(_) = pli_rx.recv().await {
+            if let Some(pipeline) = pipeline_weak.upgrade() {
+                let struct_ = gst::Structure::builder("GstForceKeyUnit")
+                    .field("all-headers", true)
+                    .build();
+                let event = gst::event::CustomUpstream::new(struct_);
+                pipeline.send_event(event);
+            } else {
+                break;
+            }
+        }
+    });
 
     // Loop to pull samples
     loop {
