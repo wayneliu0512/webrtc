@@ -3,11 +3,10 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use tokio::fs;
 
-use ashpd::WindowIdentifier;
 use ashpd::desktop::{
     PersistMode, Session,
     clipboard::Clipboard,
-    remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop},
+    remote_desktop::{DeviceType, RemoteDesktop},
     screencast::{CursorMode, Screencast, SourceType, Stream},
 };
 
@@ -120,7 +119,7 @@ pub async fn open_portal() -> Result<(
     };
 
     let remote_desktop_response = rdp_proxy
-        .start(&session, &WindowIdentifier::default())
+        .start(&session, None)
         .await
         .with_context(|| "'proxy.start' failed")?
         .response()
@@ -145,81 +144,4 @@ pub async fn open_portal() -> Result<(
     }
 
     Ok((rdp_proxy, clipboard_proxy, session, stream, fd))
-}
-
-#[derive(Clone)]
-pub struct PortalInput {
-    proxy: std::sync::Arc<RemoteDesktop<'static>>,
-    session: std::sync::Arc<Session<'static, RemoteDesktop<'static>>>,
-}
-
-impl PortalInput {
-    pub fn new(
-        proxy: std::sync::Arc<RemoteDesktop<'static>>,
-        session: std::sync::Arc<Session<'static, RemoteDesktop<'static>>>,
-    ) -> Self {
-        Self { proxy, session }
-    }
-
-    pub async fn notify_pointer_motion(&self, dx: i32, dy: i32) -> Result<()> {
-        self.proxy
-            .notify_pointer_motion(&self.session, dx as f64, dy as f64)
-            .await
-            .with_context(|| "'notify_pointer_motion' failed")?;
-        Ok(())
-    }
-
-    pub async fn notify_pointer_button(&self, button: u32, pressed: bool) -> Result<()> {
-        let state = if pressed {
-            KeyState::Pressed
-        } else {
-            KeyState::Released
-        };
-        self.proxy
-            .notify_pointer_button(
-                &self.session,
-                button
-                    .try_into()
-                    .map_err(|_| anyhow!("button out of range"))?,
-                state,
-            )
-            .await
-            .with_context(|| "'notify_pointer_button' failed")?;
-        Ok(())
-    }
-
-    pub async fn notify_keyboard_keycode(&self, keycode: u32, pressed: bool) -> Result<()> {
-        let state = if pressed {
-            KeyState::Pressed
-        } else {
-            KeyState::Released
-        };
-        self.proxy
-            .notify_keyboard_keycode(
-                &self.session,
-                keycode
-                    .try_into()
-                    .map_err(|_| anyhow!("keycode out of range"))?,
-                state,
-            )
-            .await
-            .with_context(|| "'notify_keyboard_keycode' failed")?;
-        Ok(())
-    }
-
-    pub async fn notify_scroll_discrete(&self, steps_x: i32, steps_y: i32) -> Result<()> {
-        if steps_x != 0 {
-            self.proxy
-                .notify_pointer_axis_discrete(&self.session, Axis::Horizontal, steps_x)
-                .await
-                .with_context(|| "'notify_pointer_axis_discrete(Horizontal)' failed")?;
-        }
-        if steps_y != 0 {
-            self.proxy
-                .notify_pointer_axis_discrete(&self.session, Axis::Vertical, steps_y)
-                .await
-                .with_context(|| "'notify_pointer_axis_discrete(Vertical)' failed")?;
-        }
-        Ok(())
-    }
 }
