@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::{Arc, Weak};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info};
@@ -233,8 +233,8 @@ fn setup_connection_state_handling(pc: &Arc<RTCPeerConnection>) {
 async fn run_remote_desktop_loop(
     local_track: Arc<TrackLocalStaticRTP>,
     pc_weak: Weak<RTCPeerConnection>,
-    mut pli_rx: UnboundedReceiver<()>,
-    mut input_rx: UnboundedReceiver<InputEvent>,
+    pli_rx: UnboundedReceiver<()>,
+    input_rx: UnboundedReceiver<InputEvent>,
 ) -> Result<()> {
     info!("Starting remote desktop setup...");
     
@@ -245,19 +245,67 @@ async fn run_remote_desktop_loop(
     info!("Requesting portal access...");
     let (rdp_proxy, session, stream, fd) = portal::open_portal().await
         .map_err(|e| anyhow!("Failed to open portal: {}", e))?;
-
-    let node_id = stream.pipe_wire_node_id();
-    let fd_raw = fd.as_raw_fd();
-    info!("Got portal stream: node_id={}, fd={}", node_id, fd_raw);
-
     let rdp_proxy = Arc::new(rdp_proxy);
-    // Keep a local clone for closure if needed, but session is needed for cleanup.
-    // Cleanup needs the Arc too if we change close() to use Arc, but PortalInput uses Arc now.
-    // wait, if I verify session type.
     let session = Arc::new(session);
 
     // Spawn Input Event Handler
-    let portal_input = PortalInput::new(rdp_proxy.clone(), session.clone());
+    let portal_input = PortalInput::new(rdp_proxy, session.clone());
+    spawn_input_handler(portal_input, input_rx);
+
+    // Build Pipeline and play
+    let (pipeline, appsink) = build_gstreamer_pipeline(fd.as_raw_fd(), stream.pipe_wire_node_id())?;
+    pipeline.set_state(gst::State::Playing)
+        .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
+    info!("Pipeline playing");
+
+    // Spawn PLI handler
+    spawn_pli_handler(pipeline.clone(), pli_rx);
+
+    // Loop to pull samples
+    loop {
+        // Check if peer connection is still alive
+        if pc_weak.upgrade().is_none() {
+            break;
+        }
+
+        match appsink.pull_sample() {
+            Ok(sample) => {
+                let buffer: &gst::BufferRef = match sample.buffer() {
+                    Some(b) => b,
+                    None => continue,
+                };
+
+                if let Ok(map) = buffer.map_readable() {
+                    let mut buf: &[u8] = &map;
+                    // Parse RTP packet
+                    if let Ok(packet) = Packet::unmarshal(&mut buf) {
+                        if let Err(e) = local_track.write_rtp(&packet).await {
+                            error!("Failed to write RTP: {}", e);
+                            if e.to_string().contains("closed") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_e) => {
+                // EOS or error
+                break;
+            }
+        }
+    }
+    
+    // Cleanup
+    let _ = pipeline.set_state(gst::State::Null);
+    let _ = session.close().await;
+    
+    Ok(())
+}
+
+fn spawn_input_handler(
+    portal_input: PortalInput,
+    mut input_rx: UnboundedReceiver<InputEvent>,
+) {
     tokio::spawn(async move {
         while let Some(event) = input_rx.recv().await {
             let res = match event {
@@ -287,8 +335,12 @@ async fn run_remote_desktop_loop(
         }
         info!("Input event loop ended");
     });
+}
 
-    // Construct pipeline
+fn build_gstreamer_pipeline(
+    fd_raw: RawFd,
+    node_id: u32,
+) -> Result<(gst::Pipeline, gst_app::AppSink)> {
     let pipeline = gst::Pipeline::new();
 
     let src = gst::ElementFactory::make("pipewiresrc")
@@ -344,14 +396,11 @@ async fn run_remote_desktop_loop(
 
     let appsink = sink.downcast::<gst_app::AppSink>()
         .map_err(|_| anyhow!("Failed to cast appsink"))?;
+        
+    Ok((pipeline, appsink))
+}
 
-    // Start pipeline
-    pipeline.set_state(gst::State::Playing)
-        .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
-    
-    info!("Pipeline playing");
-
-    // Spawn PLI handler
+fn spawn_pli_handler(pipeline: gst::Pipeline, mut pli_rx: UnboundedReceiver<()>) {
     let pipeline_weak = pipeline.downgrade();
     tokio::spawn(async move {
         while let Some(_) = pli_rx.recv().await {
@@ -366,44 +415,4 @@ async fn run_remote_desktop_loop(
             }
         }
     });
-
-    // Loop to pull samples
-    loop {
-        // Check if peer connection is still alive
-        if pc_weak.upgrade().is_none() {
-            break;
-        }
-
-        match appsink.pull_sample() {
-            Ok(sample) => {
-                let buffer: &gst::BufferRef = match sample.buffer() {
-                    Some(b) => b,
-                    None => continue,
-                };
-
-                if let Ok(map) = buffer.map_readable() {
-                    let mut buf: &[u8] = &map;
-                    // Parse RTP packet
-                    if let Ok(packet) = Packet::unmarshal(&mut buf) {
-                        if let Err(e) = local_track.write_rtp(&packet).await {
-                            error!("Failed to write RTP: {}", e);
-                            if e.to_string().contains("closed") {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_e) => {
-                // EOS or error
-                break;
-            }
-        }
-    }
-    
-    // Cleanup
-    let _ = pipeline.set_state(gst::State::Null);
-    let _ = session.close().await;
-    
-    Ok(())
 }
