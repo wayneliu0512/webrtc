@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import type { InputEvent } from "../types/InputEvent";
 
 export type ConnectionStatus =
   | "Disconnected"
@@ -10,12 +11,16 @@ export interface UseWebRTC {
   logs: string[];
   connectionStatus: ConnectionStatus;
   isConnecting: boolean;
-  connect: () => Promise<void>;
-  sendMessage: (msg: string) => void;
+  connect: (url: string) => Promise<void>;
+  sendInputEvent: (event: InputEvent) => void;
+  sendClipboard: (text: string) => void;
+  sendClipboardGet: () => void;
   disconnect: () => void;
 }
 
-export const useWebRTC = (): UseWebRTC => {
+export const useWebRTC = (
+  onClipboardReceived?: (text: string) => void,
+): UseWebRTC => {
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [connectionStatus, setConnectionStatus] =
@@ -93,7 +98,25 @@ export const useWebRTC = (): UseWebRTC => {
       };
 
       const handleMessage = (event: MessageEvent) => {
-        addLog(`Received (DC): ${event.data}`);
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.clipboard) {
+            if (msg.clipboard.text) {
+              addLog(`Received Clipboard: ${msg.clipboard.text}`);
+              if (onClipboardReceived) {
+                onClipboardReceived(msg.clipboard.text);
+              }
+            } else {
+              addLog(
+                `Received Clipboard event: ${JSON.stringify(msg.clipboard)}`,
+              );
+            }
+          } else {
+            addLog(`Received (DC): ${event.data}`);
+          }
+        } catch {
+          addLog(`Received (DC): ${event.data}`);
+        }
       };
 
       const handleClose = () => {
@@ -117,7 +140,7 @@ export const useWebRTC = (): UseWebRTC => {
         dcRef.current = rxChannel;
       };
     },
-    [addLog, cleanup],
+    [addLog, cleanup, onClipboardReceived],
   );
 
   const createAndSendOffer = useCallback(
@@ -147,9 +170,9 @@ export const useWebRTC = (): UseWebRTC => {
   );
 
   const initWebSocket = useCallback(
-    (pc: RTCPeerConnection) => {
+    (pc: RTCPeerConnection, url: string) => {
       addLog("Connecting to WebSocket...");
-      const ws = new WebSocket(`ws://10.88.17.213:8080/ws`);
+      const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -181,39 +204,53 @@ export const useWebRTC = (): UseWebRTC => {
     [addLog, cleanup, createAndSendOffer],
   );
 
-  const connect = useCallback(async () => {
-    if (isConnecting || connectionStatus === "WebRTC Connected") return;
+  const connect = useCallback(
+    async (url: string) => {
+      if (isConnecting || connectionStatus === "WebRTC Connected") return;
 
-    setIsConnecting(true);
+      setIsConnecting(true);
 
-    try {
-      const pc = initPeerConnection();
-      setupDataChannel(pc);
-      initWebSocket(pc);
-    } catch (e) {
-      console.error(e);
-      cleanup();
+      try {
+        const pc = initPeerConnection();
+        setupDataChannel(pc);
+        initWebSocket(pc, url);
+      } catch (e) {
+        console.error(e);
+        cleanup();
+      }
+    },
+    [
+      isConnecting,
+      connectionStatus,
+      cleanup,
+      initPeerConnection,
+      setupDataChannel,
+      initWebSocket,
+    ],
+  );
+
+  const sendInputEvent = useCallback((event: InputEvent) => {
+    if (dcRef.current && dcRef.current.readyState === "open") {
+      dcRef.current.send(JSON.stringify({ inputevent: event }));
     }
-  }, [
-    isConnecting,
-    connectionStatus,
-    cleanup,
-    initPeerConnection,
-    setupDataChannel,
-    initWebSocket,
-  ]);
+  }, []);
 
-  const sendMessage = useCallback(
-    (msg: string) => {
+  const sendClipboard = useCallback(
+    (text: string) => {
       if (dcRef.current && dcRef.current.readyState === "open") {
-        dcRef.current.send(msg);
-        addLog(`Sent (DC): ${msg}`);
-      } else {
-        addLog("DataChannel not open");
+        dcRef.current.send(JSON.stringify({ clipboard: { settext: text } }));
+        addLog(`Sent Clipboard SetText: ${text}`);
       }
     },
     [addLog],
   );
+
+  const sendClipboardGet = useCallback(() => {
+    if (dcRef.current && dcRef.current.readyState === "open") {
+      dcRef.current.send(JSON.stringify({ clipboard: "gettext" }));
+      addLog(`Sent Clipboard GetText`);
+    }
+  }, [addLog]);
 
   return {
     remoteStream,
@@ -221,7 +258,9 @@ export const useWebRTC = (): UseWebRTC => {
     connectionStatus,
     isConnecting,
     connect,
-    sendMessage,
+    sendInputEvent,
+    sendClipboard,
+    sendClipboardGet,
     disconnect: cleanup,
   };
 };

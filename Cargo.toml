@@ -1,5 +1,5 @@
 [package]
-name = "webrtc"
+name = "my_webrtc"
 version = "0.1.0"
 edition = "2024"
 
@@ -16,7 +16,7 @@ tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 anyhow = "1"
 futures = "0.3.31"
-ashpd = { version = "0.9" }
+ashpd = { version = "0.12" }
 gstreamer = "0.23"
 gstreamer-app = "0.23"
 gstreamer-video = "0.23"
