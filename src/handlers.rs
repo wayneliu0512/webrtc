@@ -9,7 +9,7 @@ use tracing::info;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use crate::webrtc::create_peer_connection;
-use edge_lib::protocol::text::signal::{WebRtcSignalChannel, WebRtcSignalChannelType};
+use edge_lib::protocol::ws_text::signal::{WebRtcSignalChannel, WebRtcSignalChannelType};
 
 pub async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
     ws.on_upgrade(handle_socket)

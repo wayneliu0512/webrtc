@@ -26,9 +26,10 @@ use webrtc::track::track_remote::TrackRemote;
 use webrtc::util::Unmarshal;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-use crate::portal;
+use crate::portal::{self, PortalInput};
+use edge_lib::protocol::webrtc::input_event::InputEvent;
 
-/// Creates a new WebRTC PeerConnection with screencasting capabilities.
+/// Creates a new WebRTC PeerConnection with remote desktop capabilities.
 pub async fn create_peer_connection(
     tx: UnboundedSender<String>,
 ) -> Result<Arc<RTCPeerConnection>> {
@@ -55,6 +56,8 @@ pub async fn create_peer_connection(
     // Before these packets are returned they are processed by interceptors. For things
     // like NACK this needs to be called.
     let (pli_tx, pli_rx) = unbounded_channel();
+    let (input_tx, input_rx) = unbounded_channel::<InputEvent>();
+
     tokio::spawn(async move {
         let mut rtcp_buf = vec![0u8; 1500];
         while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {
@@ -75,16 +78,16 @@ pub async fn create_peer_connection(
         },
     ));
 
-    setup_data_channel_handling(&peer_connection);
+    setup_data_channel_handling(&peer_connection, input_tx);
     setup_ice_handling(&peer_connection, tx);
     setup_connection_state_handling(&peer_connection);
 
-    // 5. Spawn Screencast Task
-    // We pass a Weak reference to the PC so the screencast loop can stop if PC is dropped/closed.
+    // 5. Spawn Remote Desktop Task
+    // We pass a Weak reference to the PC so the remote desktop loop can stop if PC is dropped/closed.
     let pc_weak = Arc::downgrade(&peer_connection);
     tokio::spawn(async move {
-        if let Err(e) = run_screencast_loop(local_track, pc_weak, pli_rx).await {
-            error!("Screencast task encountered error: {}", e);
+        if let Err(e) = run_remote_desktop_loop(local_track, pc_weak, pli_rx, input_rx).await {
+            error!("Remote desktop task encountered error: {}", e);
         }
     });
 
@@ -118,32 +121,49 @@ fn create_local_track() -> Arc<TrackLocalStaticRTP> {
 }
 
 /// Sets up Data Channel handlers (e.g. for Echo).
-fn setup_data_channel_handling(pc: &Arc<RTCPeerConnection>) {
+/// Sets up Data Channel handlers.
+fn setup_data_channel_handling(
+    pc: &Arc<RTCPeerConnection>,
+    input_tx: UnboundedSender<InputEvent>,
+) {
     pc.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
         let d_label = d.label().to_owned();
         let d_id = d.id();
         info!("New DataChannel {} {}", d_label, d_id);
 
+        let input_tx = input_tx.clone();
+
         Box::pin(async move {
-            let d_clone = d.clone();
             let d_label_clone = d_label.clone();
+            let d_clone = d.clone();
             
             d.on_open(Box::new(move || {
                 info!("Data channel '{}'-'{}' open", d_label_clone, d_id);
                 
+                let d_clone = d_clone.clone();
+                let d_label_clone = d_label_clone.clone();
+                let input_tx = input_tx.clone();
+
                 Box::pin(async move {
                     let d_label_inner = d_label_clone.clone();
-                    let d_inner = d_clone.clone();
                     
                     d_clone.on_message(Box::new(move |msg: DataChannelMessage| {
-                        let msg_str = std::str::from_utf8(&msg.data).unwrap_or("<invalid utf8>");
-                        info!("Message from DataChannel '{}': '{}'", d_label_inner, msg_str);
+                        let input_tx = input_tx.clone();
+                        let d_label = d_label_inner.clone();
 
-                        let d_response = d_inner.clone();
-                        let reply = format!("Echo from Rust: {}", msg_str);
                         Box::pin(async move {
-                            if let Err(e) = d_response.send_text(reply).await {
-                                error!("Failed to send data channel reply: {}", e);
+                            match serde_json::from_slice::<InputEvent>(&msg.data) {
+                                Ok(event) => {
+                                    if let Err(e) = input_tx.send(event) {
+                                        error!("Failed to forward input event: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    // Log only if it's not strictly binary/garbage, or maybe just debug?
+                                    // Given we control the client, we expect valid JSON.
+                                    let msg_str = std::str::from_utf8(&msg.data).unwrap_or("<invalid utf8>");
+                                    error!("Failed to parse input event from '{}': {} | Payload: {}", d_label, e, msg_str);
+                                }
                             }
                         })
                     }));
@@ -208,29 +228,57 @@ fn setup_connection_state_handling(pc: &Arc<RTCPeerConnection>) {
     }));
 }
 
-/// The main loop for the Screencast task:
-/// 1. Initializes GStreamer
-/// 2. Requests Portal Access
-/// 3. Builds and runs the Pipeline
-/// 4. Pushes RTP packets to the Track
-async fn run_screencast_loop(
+async fn run_remote_desktop_loop(
     local_track: Arc<TrackLocalStaticRTP>,
     pc_weak: Weak<RTCPeerConnection>,
     mut pli_rx: UnboundedReceiver<()>,
+    mut input_rx: UnboundedReceiver<InputEvent>,
 ) -> Result<()> {
-    info!("Starting screencast setup...");
+    info!("Starting remote desktop setup...");
     
     // Initialize GStreamer
     gst::init().map_err(|e| anyhow!("Failed to init GStreamer: {}", e))?;
 
     // Open Portal
     info!("Requesting portal access...");
-    let (session, stream, fd) = portal::open_portal().await
+    let (rdp_proxy, session, stream, fd) = portal::open_portal().await
         .map_err(|e| anyhow!("Failed to open portal: {}", e))?;
 
     let node_id = stream.pipe_wire_node_id();
     let fd_raw = fd.as_raw_fd();
     info!("Got portal stream: node_id={}, fd={}", node_id, fd_raw);
+
+    let rdp_proxy = Arc::new(rdp_proxy);
+    // Keep a local clone for closure if needed, but session is needed for cleanup.
+    // Cleanup needs the Arc too if we change close() to use Arc, but PortalInput uses Arc now.
+    // wait, if I verify session type.
+    let session = Arc::new(session);
+
+    // Spawn Input Event Handler
+    let portal_input = PortalInput::new(rdp_proxy.clone(), session.clone());
+    tokio::spawn(async move {
+        while let Some(event) = input_rx.recv().await {
+            let res = match event {
+                InputEvent::PointerMotion { dx, dy } => {
+                     portal_input.notify_pointer_motion(dx, dy).await
+                }
+                InputEvent::PointerButton { button, pressed } => {
+                     portal_input.notify_pointer_button(button, pressed).await
+                }
+                InputEvent::Scroll { steps_x, steps_y } => {
+                     portal_input.notify_scroll_discrete(steps_x, steps_y).await
+                }
+                InputEvent::Key { keycode, pressed } => {
+                     portal_input.notify_keyboard_keycode(keycode, pressed).await
+                }
+            };
+
+            if let Err(e) = res {
+                error!("Input injection failed: {:#}", e);
+            }
+        }
+        info!("Input event loop ended");
+    });
 
     // Construct pipeline
     let pipeline = gst::Pipeline::new();
