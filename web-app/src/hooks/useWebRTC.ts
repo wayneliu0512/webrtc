@@ -11,7 +11,7 @@ export interface UseWebRTC {
   logs: string[];
   connectionStatus: ConnectionStatus;
   isConnecting: boolean;
-  connect: () => Promise<void>;
+  connect: (url: string) => Promise<void>;
   sendInputEvent: (event: InputEvent) => void;
   sendClipboard: (text: string) => void;
   sendClipboardGet: () => void;
@@ -170,9 +170,9 @@ export const useWebRTC = (
   );
 
   const initWebSocket = useCallback(
-    (pc: RTCPeerConnection) => {
+    (pc: RTCPeerConnection, url: string) => {
       addLog("Connecting to WebSocket...");
-      const ws = new WebSocket(`ws://10.88.17.213:8080/ws`);
+      const ws = new WebSocket(url);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -204,27 +204,30 @@ export const useWebRTC = (
     [addLog, cleanup, createAndSendOffer],
   );
 
-  const connect = useCallback(async () => {
-    if (isConnecting || connectionStatus === "WebRTC Connected") return;
+  const connect = useCallback(
+    async (url: string) => {
+      if (isConnecting || connectionStatus === "WebRTC Connected") return;
 
-    setIsConnecting(true);
+      setIsConnecting(true);
 
-    try {
-      const pc = initPeerConnection();
-      setupDataChannel(pc);
-      initWebSocket(pc);
-    } catch (e) {
-      console.error(e);
-      cleanup();
-    }
-  }, [
-    isConnecting,
-    connectionStatus,
-    cleanup,
-    initPeerConnection,
-    setupDataChannel,
-    initWebSocket,
-  ]);
+      try {
+        const pc = initPeerConnection();
+        setupDataChannel(pc);
+        initWebSocket(pc, url);
+      } catch (e) {
+        console.error(e);
+        cleanup();
+      }
+    },
+    [
+      isConnecting,
+      connectionStatus,
+      cleanup,
+      initPeerConnection,
+      setupDataChannel,
+      initWebSocket,
+    ],
+  );
 
   const sendInputEvent = useCallback((event: InputEvent) => {
     if (dcRef.current && dcRef.current.readyState === "open") {
