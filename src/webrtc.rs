@@ -289,9 +289,10 @@ async fn run_remote_desktop_loop(
 
     // Open Portal
     info!("Requesting portal access...");
-    let (rdp_proxy, session, stream, fd) = portal::open_portal().await
+    let (rdp_proxy, clipboard_proxy, session, stream, fd) = portal::open_portal().await
         .map_err(|e| anyhow!("Failed to open portal: {}", e))?;
     let rdp_proxy = Arc::new(rdp_proxy);
+    let clipboard_proxy = Arc::new(clipboard_proxy);
     let session = Arc::new(session);
 
     // Spawn Input Event Handler
@@ -305,7 +306,7 @@ async fn run_remote_desktop_loop(
     // We reuse the rdp_proxy (RemoteDesktop portal handle)
     // Note: The original 'remote' struct in 'ref/remote_desktop.rs' bundled session and proxy. 
     // Here we have them separate. Adapt clipboard_loop accordingly.
-    tokio::spawn(clipboard_loop(rdp_proxy, session.clone(), dc_out_tx, clipboard_cmd_rx, shutdown_rx));
+    tokio::spawn(clipboard_loop(clipboard_proxy, session.clone(), dc_out_tx, clipboard_cmd_rx, shutdown_rx));
 
 
     // Build Pipeline and play
@@ -506,20 +507,12 @@ async fn write_fd_text(fd: std::os::fd::OwnedFd, text: &str) -> Result<()> {
 }
 
 async fn clipboard_loop(
-    rdp_proxy: Arc<ashpd::desktop::remote_desktop::RemoteDesktop<'static>>,
+    clipboard: Arc<ashpd::desktop::clipboard::Clipboard<'static>>,
     session: Arc<ashpd::desktop::Session<'static, ashpd::desktop::remote_desktop::RemoteDesktop<'static>>>,
     dc_out_tx: UnboundedSender<DataChannelMsg>,
     mut clipboard_cmd_rx: UnboundedReceiver<ClipboardEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
-    let clipboard = match Clipboard::new().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to create clipboard portal: {:#}", e);
-            return;
-        }
-    };
-
     let mut owner_changed = match clipboard.receive_selection_owner_changed().await {
         Ok(stream) => stream.boxed(),
         Err(e) => {

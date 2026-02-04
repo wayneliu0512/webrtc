@@ -55,6 +55,7 @@ async fn save_restore_token(token: &str) -> Result<()> {
 /// the portal may keep the remote desktop session alive longer than expected.
 pub async fn open_portal() -> Result<(
     RemoteDesktop<'static>,
+    Clipboard<'static>,
     Session<'static, RemoteDesktop<'static>>,
     Stream,
     OwnedFd,
@@ -104,17 +105,17 @@ pub async fn open_portal() -> Result<(
         .await
         .with_context(|| "'proxy.select_devices' failed")?;
 
-    let _ = match Clipboard::new().await {
+    let clipboard_proxy = match Clipboard::new().await {
         Ok(clipboard) => match clipboard.request(&session).await {
-            Ok(()) => true,
+            Ok(()) => clipboard,
             Err(e) => {
                 tracing::warn!("Clipboard request failed: {:#}", e);
-                false
+                return Err(anyhow!("Clipboard request failed: {:#}", e));
             }
         },
         Err(e) => {
             tracing::warn!("Failed to create clipboard portal: {:#}", e);
-            false
+            return Err(anyhow!("Failed to create clipboard portal: {:#}", e));
         }
     };
 
@@ -143,7 +144,7 @@ pub async fn open_portal() -> Result<(
             .with_context(|| "'save_restore_token' failed")?;
     }
 
-    Ok((rdp_proxy, session, stream, fd))
+    Ok((rdp_proxy, clipboard_proxy, session, stream, fd))
 }
 
 #[derive(Clone)]
