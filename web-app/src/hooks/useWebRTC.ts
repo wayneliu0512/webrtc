@@ -3,7 +3,8 @@ import type { InputEvent } from "../types/InputEvent";
 
 export type ConnectionStatus =
   | "Disconnected"
-  | "Signaling Connected"
+  | "Generating Offer"
+  | "Waiting for Answer"
   | "WebRTC Connected";
 
 export interface UseWebRTC {
@@ -11,7 +12,8 @@ export interface UseWebRTC {
   logs: string[];
   connectionStatus: ConnectionStatus;
   isConnecting: boolean;
-  connect: (url: string) => Promise<void>;
+  generateOffer: () => Promise<string>;
+  setRemoteAnswer: (answerSdp: string) => Promise<void>;
   sendInputEvent: (event: InputEvent) => void;
   sendClipboard: (text: string) => void;
   sendClipboardGet: () => void;
@@ -28,7 +30,6 @@ export const useWebRTC = (
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
 
   const addLog = useCallback((msg: string) => {
@@ -42,10 +43,6 @@ export const useWebRTC = (
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
-    }
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
     }
     dcRef.current = null;
 
@@ -78,6 +75,14 @@ export const useWebRTC = (
 
     pc.onconnectionstatechange = () => {
       addLog(`PC State: ${pc.connectionState}`);
+      if (pc.connectionState === "connected") {
+        setConnectionStatus("WebRTC Connected");
+      } else if (
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "failed"
+      ) {
+        setConnectionStatus("Disconnected");
+      }
     };
 
     pcRef.current = pc;
@@ -143,19 +148,36 @@ export const useWebRTC = (
     [addLog, cleanup, onClipboardReceived],
   );
 
-  const createAndSendOffer = useCallback(
-    async (pc: RTCPeerConnection, ws: WebSocket) => {
-      addLog("Creating Offer...");
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+  const generateOffer = useCallback(async (): Promise<string> => {
+    if (connectionStatus !== "Disconnected") {
+      addLog("Already connected or connecting. Disconnect first.");
+      throw new Error("Already connected");
+    }
+    setIsConnecting(true);
+    setConnectionStatus("Generating Offer");
 
+    const pc = initPeerConnection();
+    setupDataChannel(pc);
+
+    addLog("Creating Offer...");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    return new Promise<string>((resolve) => {
       const checkState = () => {
         if (pc.iceGatheringState === "complete") {
           pc.removeEventListener("icegatheringstatechange", checkState);
-          addLog("ICE Gathering Complete. Sending Offer...");
-          const localOffer = pc.localDescription;
-          if (localOffer && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "offer", sdp: localOffer.sdp }));
+          addLog("ICE Gathering Complete.");
+          if (pc.localDescription) {
+            // We wrap it in the same JSON structure as before for compatibility,
+            // or just plain SDP? user asked for "SDP content".
+            // The backend expects `WebRtcSignalChannel` JSON structure: { type: "offer", sdp: "..." }
+            const jsonOffer = {
+              type: "offer",
+              sdp: pc.localDescription.sdp,
+            };
+            setConnectionStatus("Waiting for Answer");
+            resolve(JSON.stringify(jsonOffer));
           }
         }
       };
@@ -165,68 +187,32 @@ export const useWebRTC = (
       } else {
         pc.addEventListener("icegatheringstatechange", checkState);
       }
-    },
-    [addLog],
-  );
+    });
+  }, [addLog, connectionStatus, initPeerConnection, setupDataChannel]);
 
-  const initWebSocket = useCallback(
-    (pc: RTCPeerConnection, url: string) => {
-      addLog("Connecting to WebSocket...");
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        addLog("WebSocket connected");
-        setConnectionStatus("Signaling Connected");
-        createAndSendOffer(pc, ws);
-      };
-
-      ws.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "answer") {
-          addLog("Received Answer");
-          await pc.setRemoteDescription(new RTCSessionDescription(msg));
-        } else if (msg.type === "candidate") {
-          addLog("Received ICE Candidate");
-          if (msg.candidate) {
-            addLog("Add ICE Candidate: " + msg.candidate);
-            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-          }
-        }
-      };
-
-      ws.onerror = (e) => addLog("WebSocket error: " + e);
-      ws.onclose = () => {
-        addLog("WebSocket closed");
-        cleanup();
-      };
-    },
-    [addLog, cleanup, createAndSendOffer],
-  );
-
-  const connect = useCallback(
-    async (url: string) => {
-      if (isConnecting || connectionStatus === "WebRTC Connected") return;
-
-      setIsConnecting(true);
+  const setRemoteAnswer = useCallback(
+    async (answerJson: string) => {
+      if (!pcRef.current) {
+        addLog("No PeerConnection initialized.");
+        return;
+      }
 
       try {
-        const pc = initPeerConnection();
-        setupDataChannel(pc);
-        initWebSocket(pc, url);
+        const msg = JSON.parse(answerJson);
+        if (msg.type === "answer") {
+          addLog("Setting Remote Description (Answer)...");
+          await pcRef.current.setRemoteDescription(
+            new RTCSessionDescription(msg),
+          );
+          addLog("Remote Description Set.");
+        } else {
+          addLog("Invalid answer format. Expected type 'answer'.");
+        }
       } catch (e) {
-        console.error(e);
-        cleanup();
+        addLog("Failed to parse answer: " + e);
       }
     },
-    [
-      isConnecting,
-      connectionStatus,
-      cleanup,
-      initPeerConnection,
-      setupDataChannel,
-      initWebSocket,
-    ],
+    [addLog],
   );
 
   const sendInputEvent = useCallback((event: InputEvent) => {
@@ -257,7 +243,8 @@ export const useWebRTC = (
     logs,
     connectionStatus,
     isConnecting,
-    connect,
+    generateOffer,
+    setRemoteAnswer,
     sendInputEvent,
     sendClipboard,
     sendClipboardGet,

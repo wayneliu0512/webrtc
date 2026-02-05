@@ -16,7 +16,7 @@ A high-performance remote desktop and streaming application built with **Rust** 
 
 The backend is powered by `axum` and `tokio`. It handles:
 
-- **Signaling**: WebSocket-based signaling server (`/ws`) for exchanging SDP offers/answers and ICE candidates.
+- **Signaling**: Manual SDP exchange via copy-paste. The user manually copies the SDP Offer from the frontend to the backend's stdin, and the SDP Answer from the backend's stdout to the frontend.
 - **WebRTC Negotiation**: Manages `RTCPeerConnection` for media and data streams.
 - **Media Pipeline**: Constructs a GStreamer pipeline to capture the screen (via PipeWire/Portal), encode it (VP8), and packetize it (RTP) for transmission.
 - **Input Injection**: Receives input events from the data channel and injects them into the host system using the Remote Desktop Portal.
@@ -27,7 +27,7 @@ The web application provides the viewing and control interface.
 
 - **Video Display**: Renders the incoming remote video stream.
 - **Input Capture**: Captures local mouse and keyboard events and transmits them to the backend.
-- **Connection Management**: Handles the WebRTC signaling flow (Offer/Answer exchange).
+- **Connection Management**: Handles the WebRTC manual signaling flow.
 
 ## Prerequisites
 
@@ -47,12 +47,10 @@ Navigate to the project root:
 # Build the Rust backend
 cargo build
 
-# Run the backend server
-# Default port: 8080
+# Run the backend
+# It will wait for the SDP Offer on stdin
 cargo run
 ```
-
-The server will start listening on `0.0.0.0:8080`.
 
 ### 2. Build and Run the Frontend
 
@@ -73,14 +71,20 @@ Open your browser and navigate to the URL shown by Vite (usually `http://localho
 ### 3. Usage
 
 1.  Open the web application in a browser.
-2.  Click **"Connect"** (or ensuring the connection initiates automatically).
-3.  On the host machine (backend), you may see a system prompt asking for permission to share the screen (Screen Cast Portal) and control inputs (Remote Desktop Portal). **Accept these requests**.
-4.  Once connected, you should see the remote screen.
-5.  Interacting with the video stream (clicking/typing) will send input events to the host.
+2.  Click **"Generate Offer"** in the Control Panel.
+3.  Wait for the Offer SDP to appear in the "Local Offer" text area.
+4.  Copy the JSON content from "Local Offer".
+5.  Paste it into the terminal running the backend (Rust) and press Enter.
+6.  The backend will accept the offer, find the portal session, and print an **Answer SDP** JSON.
+7.  Copy the Answer SDP from the terminal.
+8.  Paste it into the "Remote Answer" text area in the web application.
+9.  Click **"Set Answer"**.
+10. On the host machine (backend), you may see a system prompt asking for permission to share the screen (Screen Cast Portal) and control inputs (Remote Desktop Portal). **Accept these requests**.
+11. Once connected, you should see the remote screen.
+12. Interacting with the video stream (clicking/typing) will send input events to the host.
 
 ## Configuration
 
-- **Signaling Server**: The frontend connects to the signaling server at `ws://localhost:8080/ws` by default. This can be configured in `src/hooks/useWebRTC.ts` if needed.
 - **Video Codec**: Currently configured to use VP8. This can be adjusted in `src/webrtc/gstreamer.rs`.
 
 ## Troubleshooting
