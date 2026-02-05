@@ -41,8 +41,9 @@ pub async fn create_peer_connection(tx: UnboundedSender<String>) -> Result<Arc<R
     // 1. Basic WebRTC API and Configuration setup
     let api = create_api()?;
     let config = RTCConfiguration {
+        // ice_servers: vec![],
         ice_servers: vec![RTCIceServer {
-            // urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.cloudflare.com:3478".to_owned()],
             ..Default::default()
         }],
         ..Default::default()
