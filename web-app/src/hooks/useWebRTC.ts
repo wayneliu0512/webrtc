@@ -52,7 +52,14 @@ export const useWebRTC = (
   }, []);
 
   const initPeerConnection = useCallback(() => {
-    const pc = new RTCPeerConnection({});
+    // const pc = new RTCPeerConnection({});
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: "stun:stun.cloudflare.com:3478",
+        },
+      ],
+    });
 
     pc.addTransceiver("video", { direction: "recvonly" });
 
@@ -71,6 +78,10 @@ export const useWebRTC = (
       if (event.candidate) {
         addLog("OnIceCandidate: " + event.candidate.candidate);
       }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      addLog(`ICE Connection State: ${pc.iceConnectionState}`);
     };
 
     pc.onconnectionstatechange = () => {
