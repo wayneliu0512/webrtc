@@ -153,7 +153,6 @@ async fn run_remote_desktop_loop(
         .await
         .map_err(|e| anyhow!("Failed to open portal: {}", e))?;
     let rdp_proxy = Arc::new(rdp_proxy);
-    let clipboard_proxy = Arc::new(clipboard_proxy);
     let session = Arc::new(session);
 
     // Spawn Input Event Handler
@@ -163,14 +162,17 @@ async fn run_remote_desktop_loop(
     // Create shutdown signal for clipboard loop
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Spawn Clipboard Loop
-    tokio::spawn(clipboard_loop(
-        clipboard_proxy,
-        session.clone(),
-        dc_out_tx,
-        clipboard_cmd_rx,
-        shutdown_rx,
-    ));
+    if let Some(clipboard_proxy) = clipboard_proxy {
+        let clipboard_proxy = Arc::new(clipboard_proxy);
+        // Spawn Clipboard Loop
+        tokio::spawn(clipboard_loop(
+            clipboard_proxy,
+            session.clone(),
+            dc_out_tx,
+            clipboard_cmd_rx,
+            shutdown_rx,
+        ));
+    }
 
     // Build Pipeline and play
     let (pipeline, appsink) = build_gstreamer_pipeline(fd.as_raw_fd(), stream.pipe_wire_node_id())?;
