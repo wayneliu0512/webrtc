@@ -58,7 +58,12 @@ pub fn build_gstreamer_pipeline(
     src.set_property("path", &node_id.to_string());
     src.set_property("always-copy", true);
 
-    // Framerate cap to prevent encoder from being overwhelmed
+    // Framerate cap: videorate converts variable framerate from pipewiresrc to fixed 30fps
+    let videorate = gst::ElementFactory::make("videorate")
+        .build()
+        .map_err(|e| anyhow!("Failed to create videorate: {}", e))?;
+    videorate.set_property("drop-only", true); // Only drop frames, never duplicate (lower latency)
+
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .build()
         .map_err(|e| anyhow!("Failed to create capsfilter: {}", e))?;
@@ -91,11 +96,29 @@ pub fn build_gstreamer_pipeline(
     sink.set_property("drop", true);
 
     pipeline
-        .add_many(&[&src, &capsfilter, &conv, &queue, &enc, &pay, &sink])
+        .add_many(&[
+            &src,
+            &conv,
+            &videorate,
+            &capsfilter,
+            &queue,
+            &enc,
+            &pay,
+            &sink,
+        ])
         .map_err(|e| anyhow!("Failed to add elements: {}", e))?;
 
-    gst::Element::link_many(&[&src, &capsfilter, &conv, &queue, &enc, &pay, &sink])
-        .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
+    gst::Element::link_many(&[
+        &src,
+        &conv,
+        &videorate,
+        &capsfilter,
+        &queue,
+        &enc,
+        &pay,
+        &sink,
+    ])
+    .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
 
     let appsink = sink
         .downcast::<gst_app::AppSink>()
