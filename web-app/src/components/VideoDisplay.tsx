@@ -20,6 +20,9 @@ export const VideoDisplay = ({
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
+      // Hint browser to minimize jitter buffer latency (Chrome 106+)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (remoteVideoRef.current as any).latencyMode = "realtime";
     }
   }, [remoteStream]);
 
@@ -185,6 +188,8 @@ export const VideoDisplay = ({
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          muted
+          disablePictureInPicture
           style={{
             width: "100%",
             borderRadius: "4px",
