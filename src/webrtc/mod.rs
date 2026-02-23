@@ -4,6 +4,7 @@ mod gstreamer;
 mod input;
 
 use ::gstreamer as gst;
+use ::gstreamer_app as gst_app;
 use gst::prelude::*;
 
 use anyhow::{Result, anyhow};
@@ -13,7 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{error, info};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MIME_TYPE_VP8, MediaEngine};
+use webrtc::api::media_engine::{MIME_TYPE_VP9, MediaEngine};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -126,7 +127,7 @@ fn create_api() -> Result<webrtc::api::API> {
 fn create_local_track() -> Arc<TrackLocalStaticRTP> {
     Arc::new(TrackLocalStaticRTP::new(
         RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_VP8.to_owned(),
+            mime_type: MIME_TYPE_VP9.to_owned(),
             ..Default::default()
         },
         "video".to_owned(),
@@ -184,36 +185,42 @@ async fn run_remote_desktop_loop(
     // Spawn PLI handler
     spawn_pli_handler(pipeline.clone(), pli_rx);
 
-    // Loop to pull samples
-    loop {
+    // Use callback-based sample handling (non-blocking)
+    // This avoids blocking a tokio worker thread with GStreamer's synchronous pull_sample()
+    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel(2);
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |appsink| {
+                let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                // try_send: drop frame if channel is full (backpressure)
+                let _ = sample_tx.try_send(sample);
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    // Async loop to process samples without blocking tokio
+    while let Some(sample) = sample_rx.recv().await {
         // Check if peer connection is still alive
         if pc_weak.upgrade().is_none() {
             break;
         }
 
-        match appsink.pull_sample() {
-            Ok(sample) => {
-                let buffer: &gst::BufferRef = match sample.buffer() {
-                    Some(b) => b,
-                    None => continue,
-                };
+        let buffer: &gst::BufferRef = match sample.buffer() {
+            Some(b) => b,
+            None => continue,
+        };
 
-                if let Ok(map) = buffer.map_readable() {
-                    let mut buf: &[u8] = &map;
-                    // Parse RTP packet
-                    if let Ok(packet) = Packet::unmarshal(&mut buf) {
-                        if let Err(e) = local_track.write_rtp(&packet).await {
-                            error!("Failed to write RTP: {}", e);
-                            if e.to_string().contains("closed") {
-                                break;
-                            }
-                        }
+        if let Ok(map) = buffer.map_readable() {
+            let mut buf: &[u8] = &map;
+            // Parse RTP packet
+            if let Ok(packet) = Packet::unmarshal(&mut buf) {
+                if let Err(e) = local_track.write_rtp(&packet).await {
+                    error!("Failed to write RTP: {}", e);
+                    if e.to_string().contains("closed") {
+                        break;
                     }
                 }
-            }
-            Err(_e) => {
-                // EOS or error
-                break;
             }
         }
     }

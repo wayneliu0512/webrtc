@@ -4,7 +4,7 @@ A high-performance remote desktop and streaming application built with **Rust** 
 
 ## Features
 
-- **Low-Latency Streaming**: Uses GStreamer and WebRTC (VP8 encoding) to stream the desktop screen with minimal delay.
+- **Low-Latency Streaming**: Uses GStreamer and WebRTC (VP9 encoding with VA-API hardware acceleration when available) to stream the desktop screen with minimal delay.
 - **Remote Control**: Supports remote mouse and keyboard input forwarding via WebRTC Data Channels.
 - **Clipboard Synchronization**: Bi-directional clipboard sharing between the host and the remote client.
 - **Wayland Support**: Utilizes `ashpd` (XDG Desktop Portal) for screen capture on Wayland systems.
@@ -81,7 +81,7 @@ Open your browser and navigate to the URL shown by Vite (usually `http://localho
 ## Configuration
 
 - **Signaling Server**: The frontend connects to the signaling server at `ws://localhost:8080/ws` by default. This can be configured in `src/hooks/useWebRTC.ts` if needed.
-- **Video Codec**: Currently configured to use VP8. This can be adjusted in `src/webrtc/gstreamer.rs`.
+- **Video Codec**: Currently configured to use VP9 (with VA-API hardware acceleration fallback). This can be adjusted in `src/webrtc/gstreamer.rs`.
 
 ## Troubleshooting
 

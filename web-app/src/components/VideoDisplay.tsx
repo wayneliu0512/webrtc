@@ -185,6 +185,8 @@ export const VideoDisplay = ({
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          muted
+          disablePictureInPicture
           style={{
             width: "100%",
             borderRadius: "4px",
