@@ -10,6 +10,7 @@ use gst::prelude::*;
 use anyhow::{Result, anyhow};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{error, info};
 use webrtc::api::APIBuilder;
@@ -17,14 +18,13 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MIME_TYPE_VP9, MediaEngine};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
+use webrtc::media::Sample as MediaSample;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
-use webrtc::rtp::packet::Packet;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
-use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
-use webrtc::util::Unmarshal;
+use webrtc::track::track_local::TrackLocal;
+use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
 use crate::portal;
 use edge_lib::protocol::webrtc::data_channel::{ClipboardEvent, DataChannelMsg, InputEvent};
@@ -43,7 +43,7 @@ pub async fn create_peer_connection(tx: UnboundedSender<String>) -> Result<Arc<R
     let api = create_api()?;
     let config = RTCConfiguration {
         ice_servers: vec![RTCIceServer {
-            // urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
             ..Default::default()
         }],
         ..Default::default()
@@ -52,7 +52,7 @@ pub async fn create_peer_connection(tx: UnboundedSender<String>) -> Result<Arc<R
     // 2. Create Peer Connection
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-    // 3. Create and Add Local Video Track
+    // 3. Create and Add Local Video Track (using Sample-based track for native RTP payloading)
     let local_track = create_local_track();
     let rtp_sender = peer_connection
         .add_track(Arc::clone(&local_track) as Arc<dyn TrackLocal + Send + Sync>)
@@ -124,8 +124,10 @@ fn create_api() -> Result<webrtc::api::API> {
 }
 
 /// Helper to create the local video track for screencasting.
-fn create_local_track() -> Arc<TrackLocalStaticRTP> {
-    Arc::new(TrackLocalStaticRTP::new(
+/// Uses TrackLocalStaticSample so webrtc-rs handles VP9 RTP payloading natively,
+/// bypassing GStreamer's potentially incompatible rtpvp9pay.
+fn create_local_track() -> Arc<TrackLocalStaticSample> {
+    Arc::new(TrackLocalStaticSample::new(
         RTCRtpCodecCapability {
             mime_type: MIME_TYPE_VP9.to_owned(),
             ..Default::default()
@@ -136,7 +138,7 @@ fn create_local_track() -> Arc<TrackLocalStaticRTP> {
 }
 
 async fn run_remote_desktop_loop(
-    local_track: Arc<TrackLocalStaticRTP>,
+    local_track: Arc<TrackLocalStaticSample>,
     pc_weak: Weak<RTCPeerConnection>,
     pli_rx: UnboundedReceiver<()>,
     input_rx: UnboundedReceiver<InputEvent>,
@@ -175,18 +177,10 @@ async fn run_remote_desktop_loop(
         ));
     }
 
-    // Build Pipeline and play
+    // Build Pipeline (outputs raw VP9 frames, NO RTP payloading)
     let (pipeline, appsink) = build_gstreamer_pipeline(fd.as_raw_fd(), stream.pipe_wire_node_id())?;
-    pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
-    info!("Pipeline playing");
 
-    // Spawn PLI handler
-    spawn_pli_handler(pipeline.clone(), pli_rx);
-
-    // Use callback-based sample handling (non-blocking)
-    // This avoids blocking a tokio worker thread with GStreamer's synchronous pull_sample()
+    // Set up callback-based sample handling BEFORE playing to avoid losing early frames
     let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel(2);
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -199,7 +193,18 @@ async fn run_remote_desktop_loop(
             .build(),
     );
 
-    // Async loop to process samples without blocking tokio
+    // Now start the pipeline
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|e| anyhow!("Failed to set pipeline state to Playing: {}", e))?;
+    info!("Pipeline playing");
+
+    // Spawn PLI handler
+    spawn_pli_handler(pipeline.clone(), pli_rx);
+
+    // Frame duration at 30fps
+    let frame_duration = Duration::from_millis(33);
+
     while let Some(sample) = sample_rx.recv().await {
         // Check if peer connection is still alive
         if pc_weak.upgrade().is_none() {
@@ -212,14 +217,19 @@ async fn run_remote_desktop_loop(
         };
 
         if let Ok(map) = buffer.map_readable() {
-            let mut buf: &[u8] = &map;
-            // Parse RTP packet
-            if let Ok(packet) = Packet::unmarshal(&mut buf) {
-                if let Err(e) = local_track.write_rtp(&packet).await {
-                    error!("Failed to write RTP: {}", e);
-                    if e.to_string().contains("closed") {
-                        break;
-                    }
+            let data: Vec<u8> = map.to_vec();
+
+            // Write raw VP9 frame — webrtc-rs handles RTP payloading natively
+            let media_sample = MediaSample {
+                data: data.into(),
+                duration: frame_duration,
+                ..Default::default()
+            };
+
+            if let Err(e) = local_track.write_sample(&media_sample).await {
+                error!("Failed to write sample: {}", e);
+                if e.to_string().contains("closed") {
+                    break;
                 }
             }
         }

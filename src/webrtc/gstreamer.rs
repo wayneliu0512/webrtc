@@ -6,9 +6,9 @@ use std::os::fd::RawFd;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::info;
 
-/// Attempts to build a VP9 encoder + RTP payloader pair.
+/// Attempts to build a VP9 encoder element.
 /// Tries VA-API hardware encoding first, falls back to software vp9enc.
-fn build_vp9_encoder() -> Result<(gst::Element, gst::Element)> {
+fn build_vp9_encoder() -> Result<gst::Element> {
     // 1. Try VA-API hardware VP9
     if let Ok(hw_enc) = gst::ElementFactory::make("vavp9enc").build() {
         info!("Using VA-API hardware VP9 encoder (vavp9enc)");
@@ -17,11 +17,7 @@ fn build_vp9_encoder() -> Result<(gst::Element, gst::Element)> {
         hw_enc.set_property("bitrate", 4000u32); // 4 Mbps
         hw_enc.set_property("key-int-max", 120u32);
         hw_enc.set_property("ref-frames", 1u32); // Minimal reference frames for low latency
-
-        let pay = gst::ElementFactory::make("rtpvp9pay")
-            .build()
-            .map_err(|e| anyhow!("Failed to create rtpvp9pay: {}", e))?;
-        return Ok((hw_enc, pay));
+        return Ok(hw_enc);
     }
 
     // 2. Software fallback: vp9enc tuned for low latency
@@ -39,12 +35,12 @@ fn build_vp9_encoder() -> Result<(gst::Element, gst::Element)> {
     sw_enc.set_property("row-mt", true); // Multi-threaded row encoding
     sw_enc.set_property_from_str("error-resilient", "default");
 
-    let pay = gst::ElementFactory::make("rtpvp9pay")
-        .build()
-        .map_err(|e| anyhow!("Failed to create rtpvp9pay: {}", e))?;
-    Ok((sw_enc, pay))
+    Ok(sw_enc)
 }
 
+/// Builds a GStreamer pipeline that outputs raw VP9 encoded frames (NOT RTP packets).
+/// RTP payloading is handled by webrtc-rs's TrackLocalStaticSample instead,
+/// which guarantees browser-compatible VP9 RTP format.
 pub fn build_gstreamer_pipeline(
     fd_raw: RawFd,
     node_id: u32,
@@ -62,7 +58,6 @@ pub fn build_gstreamer_pipeline(
     let videorate = gst::ElementFactory::make("videorate")
         .build()
         .map_err(|e| anyhow!("Failed to create videorate: {}", e))?;
-    videorate.set_property("drop-only", true); // Only drop frames, never duplicate (lower latency)
 
     let capsfilter = gst::ElementFactory::make("capsfilter")
         .build()
@@ -86,8 +81,8 @@ pub fn build_gstreamer_pipeline(
     queue.set_property("max-size-time", 0u64);
     queue.set_property_from_str("leaky", "downstream"); // Drop old frames
 
-    // VP9 encoder with hardware acceleration fallback
-    let (enc, pay) = build_vp9_encoder()?;
+    // VP9 encoder (no RTP payloader — webrtc-rs handles that)
+    let enc = build_vp9_encoder()?;
 
     let sink = gst::ElementFactory::make("appsink")
         .build()
@@ -95,30 +90,14 @@ pub fn build_gstreamer_pipeline(
     sink.set_property("sync", false);
     sink.set_property("drop", true);
 
+    // Pipeline: src → conv → videorate → capsfilter → queue → enc → sink
+    // Note: NO rtpvp9pay — raw VP9 frames go to webrtc-rs for RTP payloading
     pipeline
-        .add_many(&[
-            &src,
-            &conv,
-            &videorate,
-            &capsfilter,
-            &queue,
-            &enc,
-            &pay,
-            &sink,
-        ])
+        .add_many(&[&src, &conv, &videorate, &capsfilter, &queue, &enc, &sink])
         .map_err(|e| anyhow!("Failed to add elements: {}", e))?;
 
-    gst::Element::link_many(&[
-        &src,
-        &conv,
-        &videorate,
-        &capsfilter,
-        &queue,
-        &enc,
-        &pay,
-        &sink,
-    ])
-    .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
+    gst::Element::link_many(&[&src, &conv, &videorate, &capsfilter, &queue, &enc, &sink])
+        .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
 
     let appsink = sink
         .downcast::<gst_app::AppSink>()
