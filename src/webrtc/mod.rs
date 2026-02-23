@@ -181,7 +181,7 @@ async fn run_remote_desktop_loop(
     let (pipeline, appsink) = build_gstreamer_pipeline(fd.as_raw_fd(), stream.pipe_wire_node_id())?;
 
     // Set up callback-based sample handling BEFORE playing to avoid losing early frames
-    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel(2);
+    let (sample_tx, mut sample_rx) = tokio::sync::mpsc::channel(4);
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |appsink| {
@@ -202,9 +202,6 @@ async fn run_remote_desktop_loop(
     // Spawn PLI handler
     spawn_pli_handler(pipeline.clone(), pli_rx);
 
-    // Frame duration at 30fps
-    let frame_duration = Duration::from_millis(33);
-
     while let Some(sample) = sample_rx.recv().await {
         // Check if peer connection is still alive
         if pc_weak.upgrade().is_none() {
@@ -218,6 +215,12 @@ async fn run_remote_desktop_loop(
 
         if let Ok(map) = buffer.map_readable() {
             let data: Vec<u8> = map.to_vec();
+
+            // Use actual buffer duration when available, default to ~60fps
+            let frame_duration = buffer
+                .duration()
+                .map(|d| Duration::from_nanos(d.nseconds()))
+                .unwrap_or(Duration::from_millis(16));
 
             // Write raw VP9 frame — webrtc-rs handles RTP payloading natively
             let media_sample = MediaSample {

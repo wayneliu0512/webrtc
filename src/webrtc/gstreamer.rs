@@ -14,8 +14,8 @@ fn build_vp9_encoder() -> Result<gst::Element> {
         info!("Using VA-API hardware VP9 encoder (vavp9enc)");
         hw_enc.set_property("target-usage", 6u32); // Speed priority (1=quality, 7=speed)
         hw_enc.set_property_from_str("rate-control", "cbr");
-        hw_enc.set_property("bitrate", 4000u32); // 4 Mbps
-        hw_enc.set_property("key-int-max", 120u32);
+        hw_enc.set_property("bitrate", 3000u32); // 3 Mbps – lower = faster encode
+        hw_enc.set_property("key-int-max", 60u32); // More frequent keyframes for faster recovery
         hw_enc.set_property("ref-frames", 1u32); // Minimal reference frames for low latency
         return Ok(hw_enc);
     }
@@ -26,10 +26,10 @@ fn build_vp9_encoder() -> Result<gst::Element> {
         .build()
         .map_err(|e| anyhow!("Failed to create vp9enc: {}", e))?;
     sw_enc.set_property("deadline", 1i64); // Realtime
-    sw_enc.set_property("cpu-used", 8i32); // Max speed (0-8, higher = faster)
-    sw_enc.set_property("threads", 4i32);
+    sw_enc.set_property("cpu-used", 16i32); // Max speed (0-16 for VP9, higher = faster)
+    sw_enc.set_property("threads", 8i32); // More parallelism
     sw_enc.set_property_from_str("end-usage", "cbr");
-    sw_enc.set_property("target-bitrate", 4_000_000i32); // 4 Mbps
+    sw_enc.set_property("target-bitrate", 2_500_000i32); // 2.5 Mbps – lower = faster encode
     sw_enc.set_property("keyframe-max-dist", 120i32);
     sw_enc.set_property("lag-in-frames", 0i32); // Zero latency
     sw_enc.set_property("row-mt", true); // Multi-threaded row encoding
@@ -54,7 +54,7 @@ pub fn build_gstreamer_pipeline(
     src.set_property("path", &node_id.to_string());
     src.set_property("always-copy", true);
 
-    // Framerate cap: videorate converts variable framerate from pipewiresrc to fixed 30fps
+    // Framerate cap: videorate converts variable framerate from pipewiresrc to fixed 60fps
     let videorate = gst::ElementFactory::make("videorate")
         .build()
         .map_err(|e| anyhow!("Failed to create videorate: {}", e))?;
@@ -65,7 +65,23 @@ pub fn build_gstreamer_pipeline(
     capsfilter.set_property(
         "caps",
         gst::Caps::builder("video/x-raw")
-            .field("framerate", gst::Fraction::new(30, 1))
+            .field("framerate", gst::Fraction::new(60, 1))
+            .build(),
+    );
+
+    // Resolution cap: scale down to max 720p to reduce encoding workload
+    let scale = gst::ElementFactory::make("videoscale")
+        .build()
+        .map_err(|e| anyhow!("Failed to create videoscale: {}", e))?;
+
+    let scale_caps = gst::ElementFactory::make("capsfilter")
+        .build()
+        .map_err(|e| anyhow!("Failed to create scale capsfilter: {}", e))?;
+    scale_caps.set_property(
+        "caps",
+        gst::Caps::builder("video/x-raw")
+            .field("width", 1280i32)
+            .field("height", 720i32)
             .build(),
     );
 
@@ -90,14 +106,34 @@ pub fn build_gstreamer_pipeline(
     sink.set_property("sync", false);
     sink.set_property("drop", true);
 
-    // Pipeline: src → conv → videorate → capsfilter → queue → enc → sink
+    // Pipeline: src → conv → videorate → capsfilter(fps) → scale → scale_caps(res) → queue → enc → sink
     // Note: NO rtpvp9pay — raw VP9 frames go to webrtc-rs for RTP payloading
     pipeline
-        .add_many(&[&src, &conv, &videorate, &capsfilter, &queue, &enc, &sink])
+        .add_many(&[
+            &src,
+            &conv,
+            &videorate,
+            &capsfilter,
+            &scale,
+            &scale_caps,
+            &queue,
+            &enc,
+            &sink,
+        ])
         .map_err(|e| anyhow!("Failed to add elements: {}", e))?;
 
-    gst::Element::link_many(&[&src, &conv, &videorate, &capsfilter, &queue, &enc, &sink])
-        .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
+    gst::Element::link_many(&[
+        &src,
+        &conv,
+        &videorate,
+        &capsfilter,
+        &scale,
+        &scale_caps,
+        &queue,
+        &enc,
+        &sink,
+    ])
+    .map_err(|e| anyhow!("Failed to link elements: {}", e))?;
 
     let appsink = sink
         .downcast::<gst_app::AppSink>()
