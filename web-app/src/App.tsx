@@ -36,7 +36,8 @@ function App() {
     logs,
     connectionStatus,
     isConnecting,
-    connect,
+    generateOffer,
+    setRemoteAnswer,
     disconnect,
     sendInputEvent,
     sendClipboard,
@@ -67,7 +68,8 @@ function App() {
         </Typography>
 
         <ControlPanel
-          onConnect={connect}
+          onGenerateOffer={generateOffer}
+          onSetRemoteAnswer={setRemoteAnswer}
           onDisconnect={disconnect}
           status={connectionStatus}
           isConnecting={isConnecting}
